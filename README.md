@@ -1,5 +1,4 @@
 # AbletonMCP - Ableton Live Model Context Protocol Integration
-[![smithery badge](https://smithery.ai/badge/@ahujasid/ableton-mcp)](https://smithery.ai/server/@ahujasid/ableton-mcp)
 
 AbletonMCP connects Ableton Live to Claude AI through the Model Context Protocol (MCP), allowing Claude to directly interact with and control Ableton Live. This integration enables prompt-assisted music production, track creation, and Live session manipulation.
 
@@ -19,7 +18,7 @@ Give feedback, get inspired, and build on top of the MCP: [Discord](https://disc
 
 The system consists of two main components:
 
-1. **Ableton Remote Script** (`Ableton_Remote_Script/__init__.py`): A MIDI Remote Script for Ableton Live that creates a socket server to receive and execute commands
+1. **Ableton Remote Script** (`AbletonMCP_Remote_Script/__init__.py`): A MIDI Remote Script for Ableton Live that creates a socket server to receive and execute commands
 2. **MCP Server** (`server.py`): A Python server that implements the Model Context Protocol and connects to the Ableton Remote Script
 
 ## Installation
@@ -43,7 +42,7 @@ If you're on Mac, please install uv as:
 brew install uv
 ```
 
-Otherwise, install from [uv's official website][https://docs.astral.sh/uv/getting-started/installation/]
+Otherwise, install from [uv's official website](https://docs.astral.sh/uv/getting-started/installation/)
 
 ⚠️ Do not proceed before installing UV
 
