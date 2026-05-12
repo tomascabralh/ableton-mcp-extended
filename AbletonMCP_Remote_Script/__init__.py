@@ -56,7 +56,7 @@ class AbletonMCP(ControlSurface):
         if self.server:
             try:
                 self.server.close()
-            except:
+            except Exception:
                 pass
         
         # Wait for the server thread to exit
@@ -191,7 +191,7 @@ class AbletonMCP(ControlSurface):
                     except AttributeError:
                         # Python 2: string is already bytes
                         client.sendall(json.dumps(error_response))
-                    except:
+                    except Exception:
                         # If we can't send the error, the connection is probably dead
                         break
                     
@@ -203,7 +203,7 @@ class AbletonMCP(ControlSurface):
         finally:
             try:
                 client.close()
-            except:
+            except Exception:
                 pass
             self.log_message("Client handler stopped")
     
@@ -226,10 +226,11 @@ class AbletonMCP(ControlSurface):
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
             # Commands that modify Live's state should be scheduled on the main thread
-            elif command_type in ["create_midi_track", "set_track_name", 
-                                 "create_clip", "add_notes_to_clip", "set_clip_name", 
+            elif command_type in ["create_midi_track", "set_track_name",
+                                 "create_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
-                                 "start_playback", "stop_playback", "load_browser_item"]:
+                                 "start_playback", "stop_playback", "load_browser_item",
+                                 "delete_track", "delete_clip"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -274,15 +275,15 @@ class AbletonMCP(ControlSurface):
                             result = self._start_playback()
                         elif command_type == "stop_playback":
                             result = self._stop_playback()
-                        elif command_type == "load_instrument_or_effect":
-                            track_index = params.get("track_index", 0)
-                            uri = params.get("uri", "")
-                            result = self._load_instrument_or_effect(track_index, uri)
                         elif command_type == "load_browser_item":
                             track_index = params.get("track_index", 0)
                             item_uri = params.get("item_uri", "")
                             result = self._load_browser_item(track_index, item_uri)
-                        
+                        elif command_type == "delete_track":
+                            result = self._delete_track(params.get("track_index", 0))
+                        elif command_type == "delete_clip":
+                            result = self._delete_clip(params.get("track_index", 0), params.get("clip_index", 0))
+
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
                     except Exception as e:
@@ -312,14 +313,6 @@ class AbletonMCP(ControlSurface):
                 uri = params.get("uri", None)
                 path = params.get("path", None)
                 response["result"] = self._get_browser_item(uri, path)
-            elif command_type == "get_browser_categories":
-                category_type = params.get("category_type", "all")
-                response["result"] = self._get_browser_categories(category_type)
-            elif command_type == "get_browser_items":
-                path = params.get("path", "")
-                item_type = params.get("item_type", "all")
-                response["result"] = self._get_browser_items(path, item_type)
-            # Add the new browser commands
             elif command_type == "get_browser_tree":
                 category_type = params.get("category_type", "all")
                 response["result"] = self.get_browser_tree(category_type)
@@ -451,7 +444,26 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error setting track name: " + str(e))
             raise
-    
+
+    def _delete_track(self, track_index):
+        """Delete a track at the given index"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            name = self._song.tracks[track_index].name
+            self._song.delete_track(track_index)
+
+            result = {
+                "deleted_index": track_index,
+                "name": name,
+                "track_count": len(self._song.tracks)
+            }
+            return result
+        except Exception as e:
+            self.log_message("Error deleting track: " + str(e))
+            raise
+
     def _create_clip(self, track_index, clip_index, length):
         """Create a new MIDI clip in the specified track and clip slot"""
         try:
@@ -547,7 +559,35 @@ class AbletonMCP(ControlSurface):
         except Exception as e:
             self.log_message("Error setting clip name: " + str(e))
             raise
-    
+
+    def _delete_clip(self, track_index, clip_index):
+        """Delete the clip in the given track / clip slot"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+
+            clip_slot = track.clip_slots[clip_index]
+
+            if not clip_slot.has_clip:
+                raise Exception("No clip in slot")
+
+            clip_slot.delete_clip()
+
+            result = {
+                "deleted": True,
+                "track_index": track_index,
+                "clip_index": clip_index
+            }
+            return result
+        except Exception as e:
+            self.log_message("Error deleting clip: " + str(e))
+            raise
+
     def _set_tempo(self, tempo):
         """Set the tempo of the session"""
         try:
@@ -817,7 +857,7 @@ class AbletonMCP(ControlSurface):
                 return "midi_effect"
             else:
                 return "unknown"
-        except:
+        except Exception:
             return "unknown"
     
     def get_browser_tree(self, category_type="all"):
@@ -850,22 +890,36 @@ class AbletonMCP(ControlSurface):
                 "available_categories": browser_attrs
             }
             
-            # Helper function to process a browser item and its children
+            # Helper function to process a browser item and its children.
+            # Recurses up to max_depth levels; deeper subtrees are summarized with
+            # has_more=True instead of being expanded. Bumping max_depth gives a
+            # richer tree but is slower (browser children are materialized lazily).
+            max_depth = 2
+
             def process_item(item, depth=0):
                 if not item:
                     return None
-                
-                result = {
+
+                has_children = hasattr(item, 'children') and bool(item.children)
+                node = {
                     "name": item.name if hasattr(item, 'name') else "Unknown",
-                    "is_folder": hasattr(item, 'children') and bool(item.children),
+                    "is_folder": has_children,
                     "is_device": hasattr(item, 'is_device') and item.is_device,
                     "is_loadable": hasattr(item, 'is_loadable') and item.is_loadable,
                     "uri": item.uri if hasattr(item, 'uri') else None,
-                    "children": []
+                    "children": [],
+                    "has_more": False
                 }
-                
-                
-                return result
+
+                if has_children and depth < max_depth:
+                    for child in item.children:
+                        child_node = process_item(child, depth + 1)
+                        if child_node:
+                            node["children"].append(child_node)
+                elif has_children:
+                    node["has_more"] = True
+
+                return node
             
             # Process based on category type and available attributes
             if (category_type == "all" or category_type == "instruments") and hasattr(app.browser, 'instruments'):
