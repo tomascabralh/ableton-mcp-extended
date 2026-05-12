@@ -45,9 +45,14 @@ class AbletonConnection:
                 self.sock = None
 
     def receive_full_response(self, sock, buffer_size=8192):
-        """Receive the complete response, potentially in multiple chunks"""
+        """Receive the complete response, potentially in multiple chunks.
+
+        The socket timeout is set by the caller (send_command) before this runs.
+        It must stay above the remote script's 10s main-thread timeout for
+        state-modifying commands, or the server gives up while the remote script
+        is still working and the connection desyncs.
+        """
         chunks = []
-        sock.settimeout(8.0)
 
         try:
             while True:
@@ -115,9 +120,12 @@ class AbletonConnection:
             self.sock.sendall(json.dumps(command).encode('utf-8'))
             logger.info("Command sent, waiting for response...")
 
-            # Set timeout based on command type. The remote script blocks until Ableton has
-            # finished the operation before replying, so no extra settle delay is needed here.
-            self.sock.settimeout(8.0 if is_modifying_command else 5.0)
+            # Modifying commands must allow more than the remote script's own 10s
+            # main-thread timeout (queue.get(timeout=10.0) in _process_command), or
+            # send_command tears down the socket while the remote script is still
+            # working. The remote script blocks until Ableton finishes the op before
+            # replying, so no extra settle delay is needed here.
+            self.sock.settimeout(12.0 if is_modifying_command else 8.0)
 
             # Receive the response
             response_data = self.receive_full_response(self.sock)

@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Entry point: `MCP_Server.server:main` (registered as the `ableton-mcp` script)
 - Docker / Smithery: `python -m MCP_Server.server` over stdio (`Dockerfile`, `smithery.yaml`)
 
-There is no test suite and no linter configured. Do not invent test or lint commands.
+There is no test suite. Linting is via Ruff: `ruff check MCP_Server/` (config in `pyproject.toml`, also run in CI by `.github/workflows/lint.yml`). `AbletonMCP_Remote_Script/` is excluded from lint because it must stay Python 2 compatible.
 
 ## Architecture
 
@@ -20,14 +20,14 @@ The repo ships **two separately-deployed components** that talk over a TCP socke
 
 - A `FastMCP` server (from the `mcp` package) that exposes Ableton operations as MCP tools to Claude Desktop / Cursor over stdio.
 - Holds a **single global persistent socket** (`_ableton_connection`) to the Remote Script on `localhost:9877`. `get_ableton_connection()` retries up to 3 times and validates each new connection by sending a `get_session_info` ping. On any socket error, the global is cleared so the next call reconnects.
-- Each `@mcp.tool()` is a thin wrapper that calls `AbletonConnection.send_command(command_type, params)` and stringifies the JSON result. **State-modifying commands** are listed explicitly in `send_command`'s `is_modifying_command` set — they get longer timeouts (15s vs 10s) and 100ms sleeps before/after the call to let Ableton settle. Keep that list in sync when adding mutating tools.
+- Each `@mcp.tool()` is a thin wrapper that calls `AbletonConnection.send_command(command_type, params)` and stringifies the JSON result. **State-modifying commands** are listed explicitly in `send_command`'s `is_modifying_command` set — they get a longer socket timeout (12s vs 8s). The remote script blocks on Ableton's main thread until the op finishes before replying (bounded by a 10s `queue.get` timeout on its side), so the modifying-command socket timeout must stay above that 10s. Keep that list in sync when adding mutating tools.
 - `receive_full_response` reads in chunks until the accumulated bytes parse as valid JSON. The protocol has no length prefix, so partial-JSON-decode-failure is the framing signal.
 
 ### 2. `AbletonMCP_Remote_Script/__init__.py` — the Ableton MIDI Remote Script (inside Live)
 
 - A `ControlSurface` subclass loaded by Ableton Live as a "Control Surface" (Preferences → Link/Tempo/MIDI → Control Surface dropdown → AbletonMCP). It runs **inside Ableton's embedded Python**, not the host venv.
 - On startup it binds a TCP server on `localhost:9877` in a daemon thread and accepts multiple clients, each handled in its own thread.
-- **Threading rule (critical):** the Live API is only safe to call from Ableton's main thread. Commands that mutate state (the list in `_process_command`: `create_midi_track`, `set_track_name`, `create_clip`, `add_notes_to_clip`, `set_clip_name`, `set_tempo`, `fire_clip`, `stop_clip`, `start_playback`, `stop_playback`, `load_browser_item`) are dispatched to the main thread via `self.schedule_message(0, fn)` and the worker thread blocks on a `queue.Queue` for the result with a 10s timeout. Read-only commands run directly on the worker thread. **Any new mutating command must follow the same pattern** — calling Live API directly from the socket thread will hang or crash Live.
+- **Threading rule (critical):** the Live API is only safe to call from Ableton's main thread. Commands that mutate state (the list in `_process_command`: `create_midi_track`, `set_track_name`, `create_clip`, `add_notes_to_clip`, `set_clip_name`, `set_tempo`, `fire_clip`, `stop_clip`, `start_playback`, `stop_playback`, `load_browser_item`, `delete_track`, `delete_clip`) are dispatched to the main thread via `self.schedule_message(0, fn)` and the worker thread blocks on a `queue.Queue` for the result with a 10s timeout. Read-only commands run directly on the worker thread. **Any new mutating command must follow the same pattern** — calling Live API directly from the socket thread will hang or crash Live.
 - The file uses `from __future__ import ...` and a `try: import Queue / except ImportError: import queue` shim. Older Ableton versions shipped Python 2; **keep this code Python-2 compatible** unless you confirm the supported Ableton versions have all moved to Python 3.
 - Installation is manual: the user copies this file into Ableton's `MIDI Remote Scripts/AbletonMCP/` directory (see README for the per-OS paths). The repo's working copy is **not** what Ableton runs — edits here only take effect after the user re-copies and reloads the Control Surface in Live.
 
