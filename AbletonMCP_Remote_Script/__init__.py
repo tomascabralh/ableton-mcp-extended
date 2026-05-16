@@ -39,9 +39,7 @@ class AbletonMCP(ControlSurface):
         # Cache the song reference for easier access
         self._song = self.song()
 
-        # Lazily-populated cache of the public attribute names on app.browser
-        # (i.e. the list of top-level browser categories). The set is fixed for
-        # the lifetime of a Live session, so dir() once and remember.
+        # Lazy cache for dir(app.browser); fixed for the session.
         self._browser_attrs_cache = None
 
         # Start the socket server
@@ -139,13 +137,12 @@ class AbletonMCP(ControlSurface):
         """Handle communication with a connected client"""
         self.log_message("Client handler started")
         client.settimeout(None)  # No timeout for client socket
-        # Disable Nagle: request/response on localhost, no benefit from
-        # coalescing and Nagle/delayed-ACK can add 40-200ms stalls.
+        # No Nagle on a localhost request/response protocol.
         try:
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         except Exception as e:
-            self.log_message("Could not set TCP_NODELAY on client socket: " + str(e))
-        buffer = ''  # Changed from b'' to '' for Python 2
+            self.log_message("Could not set TCP_NODELAY: " + str(e))
+        buffer = ''  # '' not b'' for Python 2
         
         try:
             while self.running:
@@ -293,10 +290,8 @@ class AbletonMCP(ControlSurface):
         return response
 
     def _dispatch_state_command(self, command_type, params):
-        """Run a state-mutating sub-command. Caller must already be on Ableton's
-        main thread. Returns the handler's result dict; raises on unknown command
-        or on any underlying error. Called both by main_thread_task and recursively
-        by the batch handler."""
+        """Run a state-mutating sub-command on the main thread. Used by
+        main_thread_task and recursively by _run_batch."""
         if command_type == "create_midi_track":
             return self._create_midi_track(params.get("index", -1))
         elif command_type == "set_track_name":
@@ -348,9 +343,8 @@ class AbletonMCP(ControlSurface):
             raise Exception("Unknown state-modifying command: " + command_type)
 
     def _run_batch(self, commands):
-        """Execute a list of state-mutating sub-commands inside the current
-        main-thread task. Continues past per-sub failures so the caller gets a
-        full result map back."""
+        """Run sub-commands in the current main-thread task; continues past
+        per-sub failures."""
         results = []
         for sub in commands:
             sub_type = sub.get("type", "")
@@ -364,7 +358,7 @@ class AbletonMCP(ControlSurface):
         return {"results": results}
 
     def _create_clip_with_notes(self, track_index, clip_index, length, notes):
-        """create_clip + add_notes_to_clip in one main-thread task."""
+        """create_clip + add_notes_to_clip in one task."""
         self._create_clip(track_index, clip_index, length)
         self._add_notes_to_clip(track_index, clip_index, notes)
         return {
@@ -375,8 +369,7 @@ class AbletonMCP(ControlSurface):
         }
 
     def _create_track_with_instrument(self, index, name, instrument_uri):
-        """create_midi_track + optional set_track_name + load_browser_item, all
-        in one main-thread task."""
+        """create_midi_track + optional rename + load_browser_item, in one task."""
         create_result = self._create_midi_track(index)
         new_index = create_result.get("index")
         if new_index is None:
@@ -395,8 +388,7 @@ class AbletonMCP(ControlSurface):
         }
 
     def _get_browser_attrs(self, app):
-        """Return the cached list of public attributes on app.browser. Computed
-        on first use; the set is fixed for the lifetime of a Live session."""
+        """Cached list of public attribute names on app.browser."""
         if self._browser_attrs_cache is None:
             self._browser_attrs_cache = [
                 attr for attr in dir(app.browser) if not attr.startswith('_')

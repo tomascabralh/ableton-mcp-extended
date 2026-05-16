@@ -15,11 +15,8 @@ logger = logging.getLogger("AbletonMCPServer")
 
 
 class AbletonError(Exception):
-    """Application-level error returned by the Remote Script (status=error in the
-    response). Distinct from socket / framing failures: catching this separately
-    lets us preserve the persistent TCP connection across normal Ableton errors
-    (e.g. 'Track index out of range') instead of tearing it down and paying the
-    reconnect cost on the next call."""
+    """Ableton returned status=error. Caught separately so a normal app error
+    doesn't tear down the persistent socket."""
     pass
 
 
@@ -36,9 +33,7 @@ class AbletonConnection:
 
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Disable Nagle: this is a request/response protocol on localhost,
-            # we never benefit from coalescing small writes and the
-            # Nagle/delayed-ACK interaction can add 40-200ms stalls.
+            # No Nagle on a localhost request/response protocol.
             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             self.sock.connect((self.host, self.port))
             logger.info(f"Connected to Ableton at {self.host}:{self.port}")
@@ -59,17 +54,10 @@ class AbletonConnection:
                 self.sock = None
 
     def receive_full_response(self, sock, buffer_size=8192):
-        """Receive one complete JSON response and return it parsed.
-
-        The wire protocol has no length prefix, so we detect message boundaries
-        by attempting to JSON-decode the accumulated buffer after each recv.
-        We return the parsed dict (not bytes) so the caller doesn't re-parse.
-
-        The socket timeout is set by the caller (send_command) before this runs.
-        It must stay above the remote script's 10s main-thread timeout for
-        state-modifying commands, or the server gives up while the remote script
-        is still working and the connection desyncs.
-        """
+        """Receive one complete JSON response and return it parsed. Framing is
+        by JSON-decode-success (no length prefix). Caller owns the socket
+        timeout — must exceed the remote script's 10s queue bound for modifying
+        commands or the connection desyncs."""
         chunks = []
 
         try:
@@ -136,11 +124,8 @@ class AbletonConnection:
             # Send the command
             self.sock.sendall(json.dumps(command).encode('utf-8'))
 
-            # Modifying commands must allow more than the remote script's own 10s
-            # main-thread timeout (queue.get(timeout=10.0) in _process_command), or
-            # send_command tears down the socket while the remote script is still
-            # working. The remote script blocks until Ableton finishes the op before
-            # replying, so no extra settle delay is needed here.
+            # Modifying timeout must exceed the remote script's 10s queue bound,
+            # else we tear down the socket while it's still working.
             self.sock.settimeout(12.0 if is_modifying_command else 8.0)
 
             # Receive and parse the response in one shot
@@ -148,13 +133,11 @@ class AbletonConnection:
             logger.debug(f"Response status: {response.get('status', 'unknown')}")
 
             if response.get("status") == "error":
-                # Application-level error: do NOT clear self.sock — the connection
-                # is still healthy, only the requested operation failed.
+                # App error: socket is fine, only the operation failed.
                 raise AbletonError(response.get("message", "Unknown error from Ableton"))
 
             return response.get("result", {})
         except AbletonError:
-            # Bubble up unchanged; persistent socket stays alive.
             raise
         except socket.timeout:
             logger.error("Socket timeout while waiting for response from Ableton")
@@ -698,33 +681,22 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
         return f"Error loading drum kit: {str(e)}"
 
 
-# --- Composite / batching tools ---
-# Each of these runs N sub-operations inside a single main-thread task on the
-# Remote Script, collapsing N round-trips (and N ~100ms _Framework ticks) into
-# one. Prefer these over chaining individual tools when you know up front what
-# you want to build.
+# Composite / batching tools — N sub-ops in one main-thread task = ~1 tick instead of N.
 
 @mcp.tool()
 def batch(ctx: Context, commands: List[Dict[str, Any]]) -> str:
     """
     Run multiple state-modifying commands in one round-trip.
 
-    All sub-commands execute inside a single main-thread task on the Remote
-    Script, so the Ableton-framework timer fires once for the whole batch
-    instead of once per command — much faster than calling the tools sequentially.
-
     Parameters:
-    - commands: list of sub-commands. Each is a dict like
-        {"type": "<command_name>", "params": {...}}
-      Supported sub-command types (state-modifying only): create_midi_track,
-      set_track_name, create_clip, add_notes_to_clip, set_clip_name, set_tempo,
-      fire_clip, stop_clip, start_playback, stop_playback, load_browser_item,
-      delete_track, delete_clip, create_clip_with_notes, create_track_with_instrument.
-      Read-only commands (get_*) must be called outside the batch.
+    - commands: list of {"type": "<command_name>", "params": {...}}.
+      State-modifying types only (create_midi_track, set_track_name, create_clip,
+      add_notes_to_clip, set_clip_name, set_tempo, fire_clip, stop_clip,
+      start_playback, stop_playback, load_browser_item, delete_track, delete_clip,
+      create_clip_with_notes, create_track_with_instrument). Call get_* tools outside.
 
-    Each sub-command runs independently — if one fails, the rest still run.
-    Returns a JSON list of per-sub-command results, each `{ok, result}` or
-    `{ok: false, error}`.
+    Sub-commands run independently; one failure does not abort the rest.
+    Returns a JSON list of `{ok, result}` or `{ok: false, error}` per sub-command.
     """
     try:
         ableton = get_ableton_connection()
@@ -744,16 +716,12 @@ def create_clip_with_notes(
     notes: List[Dict[str, Union[int, float, bool]]],
 ) -> str:
     """
-    Create a MIDI clip and populate it with notes, in a single round-trip.
-
-    Equivalent to `create_clip` followed by `add_notes_to_clip`, but collapses
-    them into one main-thread task.
+    create_clip + add_notes_to_clip in one round-trip.
 
     Parameters:
-    - track_index: The index of the track to create the clip in
-    - clip_index: The index of the clip slot
-    - length: The clip length in beats
-    - notes: list of note dicts (pitch, start_time, duration, velocity, mute)
+    - track_index, clip_index: where to put the clip
+    - length: clip length in beats
+    - notes: list of {pitch, start_time, duration, velocity, mute} dicts
     """
     try:
         ableton = get_ableton_connection()
@@ -778,16 +746,12 @@ def create_track_with_instrument(
     index: int = -1,
 ) -> str:
     """
-    Create a MIDI track, optionally rename it, and load an instrument onto it
-    in a single round-trip.
-
-    Equivalent to `create_midi_track` (+ optional `set_track_name`) followed by
-    `load_instrument_or_effect`, but collapses them into one main-thread task.
+    create_midi_track + optional rename + load instrument, in one round-trip.
 
     Parameters:
-    - instrument_uri: URI of the instrument to load (from get_browser_tree / get_browser_items_at_path)
-    - name: Optional name for the new track. Empty string = keep the default name.
-    - index: Where to insert the new track (-1 = end of list)
+    - instrument_uri: URI from get_browser_tree / get_browser_items_at_path
+    - name: optional track name ("" keeps the default)
+    - index: insertion index (-1 = end)
     """
     try:
         ableton = get_ableton_connection()
