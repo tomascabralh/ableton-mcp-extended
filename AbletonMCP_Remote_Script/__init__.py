@@ -38,7 +38,10 @@ class AbletonMCP(ControlSurface):
         
         # Cache the song reference for easier access
         self._song = self.song()
-        
+
+        # Lazy cache for dir(app.browser); fixed for the session.
+        self._browser_attrs_cache = None
+
         # Start the socket server
         self.start_server()
         
@@ -134,7 +137,12 @@ class AbletonMCP(ControlSurface):
         """Handle communication with a connected client"""
         self.log_message("Client handler started")
         client.settimeout(None)  # No timeout for client socket
-        buffer = ''  # Changed from b'' to '' for Python 2
+        # No Nagle on a localhost request/response protocol.
+        try:
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception as e:
+            self.log_message("Could not set TCP_NODELAY: " + str(e))
+        buffer = ''  # '' not b'' for Python 2
         
         try:
             while self.running:
@@ -225,80 +233,31 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
-            # Commands that modify Live's state should be scheduled on the main thread
+            # Commands that modify Live's state must run on Ableton's main thread.
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
-                                 "delete_track", "delete_clip"]:
-                # Use a thread-safe approach with a response queue
+                                 "delete_track", "delete_clip",
+                                 "batch", "create_clip_with_notes",
+                                 "create_track_with_instrument"]:
                 response_queue = queue.Queue()
-                
-                # Define a function to execute on the main thread
+
                 def main_thread_task():
                     try:
-                        result = None
-                        if command_type == "create_midi_track":
-                            index = params.get("index", -1)
-                            result = self._create_midi_track(index)
-                        elif command_type == "set_track_name":
-                            track_index = params.get("track_index", 0)
-                            name = params.get("name", "")
-                            result = self._set_track_name(track_index, name)
-                        elif command_type == "create_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            length = params.get("length", 4.0)
-                            result = self._create_clip(track_index, clip_index, length)
-                        elif command_type == "add_notes_to_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            notes = params.get("notes", [])
-                            result = self._add_notes_to_clip(track_index, clip_index, notes)
-                        elif command_type == "set_clip_name":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            name = params.get("name", "")
-                            result = self._set_clip_name(track_index, clip_index, name)
-                        elif command_type == "set_tempo":
-                            tempo = params.get("tempo", 120.0)
-                            result = self._set_tempo(tempo)
-                        elif command_type == "fire_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            result = self._fire_clip(track_index, clip_index)
-                        elif command_type == "stop_clip":
-                            track_index = params.get("track_index", 0)
-                            clip_index = params.get("clip_index", 0)
-                            result = self._stop_clip(track_index, clip_index)
-                        elif command_type == "start_playback":
-                            result = self._start_playback()
-                        elif command_type == "stop_playback":
-                            result = self._stop_playback()
-                        elif command_type == "load_browser_item":
-                            track_index = params.get("track_index", 0)
-                            item_uri = params.get("item_uri", "")
-                            result = self._load_browser_item(track_index, item_uri)
-                        elif command_type == "delete_track":
-                            result = self._delete_track(params.get("track_index", 0))
-                        elif command_type == "delete_clip":
-                            result = self._delete_clip(params.get("track_index", 0), params.get("clip_index", 0))
-
-                        # Put the result in the queue
+                        result = self._dispatch_state_command(command_type, params)
                         response_queue.put({"status": "success", "result": result})
                     except Exception as e:
                         self.log_message("Error in main thread task: " + str(e))
                         self.log_message(traceback.format_exc())
                         response_queue.put({"status": "error", "message": str(e)})
-                
-                # Schedule the task to run on the main thread
+
                 try:
                     self.schedule_message(0, main_thread_task)
                 except AssertionError:
-                    # If we're already on the main thread, execute directly
+                    # Already on the main thread — run inline.
                     main_thread_task()
-                
-                # Wait for the response with a timeout
+
                 try:
                     task_response = response_queue.get(timeout=10.0)
                     if task_response.get("status") == "error":
@@ -329,9 +288,115 @@ class AbletonMCP(ControlSurface):
             response["message"] = str(e)
         
         return response
-    
+
+    def _dispatch_state_command(self, command_type, params):
+        """Run a state-mutating sub-command on the main thread. Used by
+        main_thread_task and recursively by _run_batch."""
+        if command_type == "create_midi_track":
+            return self._create_midi_track(params.get("index", -1))
+        elif command_type == "set_track_name":
+            return self._set_track_name(params.get("track_index", 0), params.get("name", ""))
+        elif command_type == "create_clip":
+            return self._create_clip(params.get("track_index", 0),
+                                     params.get("clip_index", 0),
+                                     params.get("length", 4.0))
+        elif command_type == "add_notes_to_clip":
+            return self._add_notes_to_clip(params.get("track_index", 0),
+                                           params.get("clip_index", 0),
+                                           params.get("notes", []))
+        elif command_type == "set_clip_name":
+            return self._set_clip_name(params.get("track_index", 0),
+                                       params.get("clip_index", 0),
+                                       params.get("name", ""))
+        elif command_type == "set_tempo":
+            return self._set_tempo(params.get("tempo", 120.0))
+        elif command_type == "fire_clip":
+            return self._fire_clip(params.get("track_index", 0),
+                                   params.get("clip_index", 0))
+        elif command_type == "stop_clip":
+            return self._stop_clip(params.get("track_index", 0),
+                                   params.get("clip_index", 0))
+        elif command_type == "start_playback":
+            return self._start_playback()
+        elif command_type == "stop_playback":
+            return self._stop_playback()
+        elif command_type == "load_browser_item":
+            return self._load_browser_item(params.get("track_index", 0),
+                                           params.get("item_uri", ""))
+        elif command_type == "delete_track":
+            return self._delete_track(params.get("track_index", 0))
+        elif command_type == "delete_clip":
+            return self._delete_clip(params.get("track_index", 0),
+                                     params.get("clip_index", 0))
+        elif command_type == "batch":
+            return self._run_batch(params.get("commands", []))
+        elif command_type == "create_clip_with_notes":
+            return self._create_clip_with_notes(params.get("track_index", 0),
+                                                params.get("clip_index", 0),
+                                                params.get("length", 4.0),
+                                                params.get("notes", []))
+        elif command_type == "create_track_with_instrument":
+            return self._create_track_with_instrument(params.get("index", -1),
+                                                      params.get("name", ""),
+                                                      params.get("instrument_uri", ""))
+        else:
+            raise Exception("Unknown state-modifying command: " + command_type)
+
+    def _run_batch(self, commands):
+        """Run sub-commands in the current main-thread task; continues past
+        per-sub failures."""
+        results = []
+        for sub in commands:
+            sub_type = sub.get("type", "")
+            sub_params = sub.get("params", {})
+            try:
+                sub_result = self._dispatch_state_command(sub_type, sub_params)
+                results.append({"ok": True, "type": sub_type, "result": sub_result})
+            except Exception as e:
+                self.log_message("Batch sub-command '" + sub_type + "' failed: " + str(e))
+                results.append({"ok": False, "type": sub_type, "error": str(e)})
+        return {"results": results}
+
+    def _create_clip_with_notes(self, track_index, clip_index, length, notes):
+        """create_clip + add_notes_to_clip in one task."""
+        self._create_clip(track_index, clip_index, length)
+        self._add_notes_to_clip(track_index, clip_index, notes)
+        return {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "length": length,
+            "note_count": len(notes),
+        }
+
+    def _create_track_with_instrument(self, index, name, instrument_uri):
+        """create_midi_track + optional rename + load_browser_item, in one task."""
+        create_result = self._create_midi_track(index)
+        new_index = create_result.get("index")
+        if new_index is None:
+            raise Exception("Could not determine new track index after create_midi_track")
+        if name:
+            self._set_track_name(new_index, name)
+        instrument_loaded = False
+        if instrument_uri:
+            load_result = self._load_browser_item(new_index, instrument_uri)
+            instrument_loaded = bool(load_result.get("loaded", False))
+        final_name = self._song.tracks[new_index].name
+        return {
+            "track_index": new_index,
+            "name": final_name,
+            "instrument_loaded": instrument_loaded,
+        }
+
+    def _get_browser_attrs(self, app):
+        """Cached list of public attribute names on app.browser."""
+        if self._browser_attrs_cache is None:
+            self._browser_attrs_cache = [
+                attr for attr in dir(app.browser) if not attr.startswith('_')
+            ]
+        return self._browser_attrs_cache
+
     # Command implementations
-    
+
     def _get_session_info(self):
         """Get information about the current session"""
         try:
@@ -881,8 +946,7 @@ class AbletonMCP(ControlSurface):
                 raise RuntimeError("Browser is not available in the Live application")
             
             # Log available browser attributes to help diagnose issues
-            browser_attrs = [attr for attr in dir(app.browser) if not attr.startswith('_')]
-            self.log_message("Available browser attributes: {0}".format(browser_attrs))
+            browser_attrs = self._get_browser_attrs(app)
             
             result = {
                 "type": category_type,
@@ -1013,8 +1077,7 @@ class AbletonMCP(ControlSurface):
                 raise RuntimeError("Browser is not available in the Live application")
             
             # Log available browser attributes to help diagnose issues
-            browser_attrs = [attr for attr in dir(app.browser) if not attr.startswith('_')]
-            self.log_message("Available browser attributes: {0}".format(browser_attrs))
+            browser_attrs = self._get_browser_attrs(app)
                 
             # Parse the path
             path_parts = path.split("/")
