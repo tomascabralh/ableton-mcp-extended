@@ -404,14 +404,24 @@ class AbletonMCP(ControlSurface):
 
     # Command implementations
 
-    def _group_track_index(self, track):
+    def _group_track_index(self, track, index_by_id=None):
         """Index of a track's immediate parent group in song.tracks, or None.
 
         Track.group_track is the *direct* parent, so nested groups resolve to the
-        immediate enclosing group, not the outermost one."""
+        immediate enclosing group, not the outermost one.
+
+        Pass index_by_id (id(track) -> index, built once from a single
+        song.tracks snapshot) to resolve many tracks in O(1) each instead of an
+        O(n) scan per call. The == scan stays as a fallback: Live can hand out a
+        distinct proxy wrapper for the same underlying track, so a map miss is
+        possible and must not be treated as 'no parent'."""
         group = getattr(track, "group_track", None)
         if group is None:
             return None
+        if index_by_id is not None:
+            idx = index_by_id.get(id(group))
+            if idx is not None:
+                return idx
         for i, t in enumerate(self._song.tracks):
             if t == group:
                 return i
@@ -420,11 +430,14 @@ class AbletonMCP(ControlSurface):
     def _get_session_info(self):
         """Get information about the current session"""
         try:
+            # One snapshot + id->index map so per-track parent lookups are O(1).
+            tracks = list(self._song.tracks)
+            index_by_id = {id(t): i for i, t in enumerate(tracks)}
             result = {
                 "tempo": self._song.tempo,
                 "signature_numerator": self._song.signature_numerator,
                 "signature_denominator": self._song.signature_denominator,
-                "track_count": len(self._song.tracks),
+                "track_count": len(tracks),
                 "return_track_count": len(self._song.return_tracks),
                 "master_track": {
                     "name": "Master",
@@ -439,9 +452,9 @@ class AbletonMCP(ControlSurface):
                         "name": t.name,
                         "is_group_track": bool(getattr(t, "is_foldable", False)),
                         "is_grouped": getattr(t, "group_track", None) is not None,
-                        "group_track_index": self._group_track_index(t),
+                        "group_track_index": self._group_track_index(t, index_by_id),
                     }
-                    for i, t in enumerate(self._song.tracks)
+                    for i, t in enumerate(tracks)
                 ]
             }
             return result
@@ -453,6 +466,7 @@ class AbletonMCP(ControlSurface):
         """Whole track tree in one round-trip: top-level tracks in order, each
         group carrying its children (recursively for nested groups)."""
         tracks = list(self._song.tracks)
+        index_by_id = {id(t): i for i, t in enumerate(tracks)}
         nodes = []
         for i, t in enumerate(tracks):
             nodes.append({
@@ -465,7 +479,7 @@ class AbletonMCP(ControlSurface):
             })
         roots = []
         for i, t in enumerate(tracks):
-            parent = self._group_track_index(t)
+            parent = self._group_track_index(t, index_by_id)
             if parent is None:
                 roots.append(nodes[i])
             else:
