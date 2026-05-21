@@ -280,6 +280,23 @@ def get_track_info(ctx: Context, track_index: int) -> str:
         return f"Error getting track info: {str(e)}"
 
 @mcp.tool()
+def get_session_structure(ctx: Context) -> str:
+    """
+    Get the full track tree in one round-trip: top-level tracks in order, each
+    group track carrying its children (recursively for nested groups). Read-only.
+    Each node has index, name, is_group_track, is_midi_track, is_audio_track, and
+    children. Use this instead of walking get_track_info per track to learn
+    hierarchy.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_session_structure")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting session structure from Ableton: {str(e)}")
+        return f"Error getting session structure: {str(e)}"
+
+@mcp.tool()
 def create_midi_track(ctx: Context, index: int = -1) -> str:
     """
     Create a new MIDI track in the Ableton session.

@@ -31,6 +31,7 @@ Give feedback, get inspired, and build on top of the MCP: [Discord](https://disc
 - **Instrument and effect selection**: Claude can access and load the right instruments, effects and sounds from Ableton's library
 - **Clip creation**: Create and edit MIDI clips with notes
 - **Session control**: Start and stop playback, fire clips, and control transport
+- **Track hierarchy**: Read group tracks and grouped children — `get_track_info` reports group/parent info and the whole nested tree is available via `get_session_structure`
 
 ## Installation
 
@@ -130,7 +131,7 @@ Once the config file has been set on Claude, and the remote script is running in
 
 ## Capabilities
 
-- Get session and track information
+- Get session and track information, including **track hierarchy** — group tracks, grouped children, and the full nested layout in one call (`get_session_structure`)
 - Create, rename, and **delete** MIDI tracks
 - Create, edit, name, and **delete** clips
 - Add notes to MIDI clips
