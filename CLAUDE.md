@@ -55,9 +55,17 @@ Every state-mutating command pays one `_Framework` tick (~0–100ms, avg ~50ms) 
 
 Loading instruments, effects, and drum kits goes through Ableton's browser. Tools take either a path (`get_browser_items_at_path("drums/acoustic/kit1")`) or an opaque URI (`load_instrument_or_effect(track_index, "query:Synths#...:FileId_5116")`) returned by browser queries. URIs are not stable across machines/library versions — always discover via `get_browser_tree` / `get_browser_items_at_path` before loading.
 
+### Track hierarchy / group tracks
+
+Group tracks (`Track.is_foldable == True`) and grouped child tracks are exposed read-only:
+- `get_track_info` returns `is_group_track`, `is_grouped`, `group_track_index` (index of the *immediate* parent group, or `null`), and `fold_state` (groups only). `arm` is `null` for tracks that can't be armed (group/return/master): reading `track.arm` on them raises a `RuntimeError` — *not* an `AttributeError` — so it's guarded behind `track.can_be_armed` inside a `try/except`. Do **not** switch this back to `getattr(track, "arm", None)`: getattr's default only swallows `AttributeError`, so the `RuntimeError` propagates and `get_track_info` crashes on group tracks (this was the bug). The `_group_track_index` helper resolves a parent object to its index in `song.tracks`.
+- `get_session_info` mirrors a compact per-track list with the same hierarchy flags.
+- `get_session_structure` (read-only tool) returns the whole nested tree in one round-trip. Order/nesting is correct because Ableton stores a group immediately before its contiguous, index-ordered children.
+
 ## Gotchas
 
 - **FastMCP constructor signature drifts across `mcp` package versions.** Commit `a31dcdb` removed a `description=` kwarg that newer FastMCP doesn't accept. If you bump the `mcp` dependency, re-verify the `FastMCP(...)` call in `server.py:187`.
 - **Only run one MCP server instance** (Claude Desktop *or* Cursor, not both) — they'll both try to grab the single socket connection to Ableton.
 - The Remote Script's socket server binds with `SO_REUSEADDR`, but if Live crashes mid-session the port may briefly be in `TIME_WAIT` — restart Live (not just toggle the Control Surface) if reconnection won't take.
 - `get_ableton_connection` "pings" by sending an empty bytestring (`b''`) — this is a no-op on a live socket but raises on a dead one. Don't replace it with a real command or you'll spam Live with traffic on every tool call.
+- The Remote Script's per-command log is gated behind a module-level `DEBUG` flag (default `False`) in `AbletonMCP_Remote_Script/__init__.py` — `log_message` has no levels, so this keeps the hot path quiet. Flip it to `True` to trace every command in Live's log.

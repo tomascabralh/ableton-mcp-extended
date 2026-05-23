@@ -280,6 +280,23 @@ def get_track_info(ctx: Context, track_index: int) -> str:
         return f"Error getting track info: {str(e)}"
 
 @mcp.tool()
+def get_session_structure(ctx: Context) -> str:
+    """
+    Get the full track tree in one round-trip: top-level tracks in order, each
+    group track carrying its children (recursively for nested groups). Read-only.
+    Each node has index, name, is_group_track, is_midi_track, is_audio_track, and
+    children. Use this instead of walking get_track_info per track to learn
+    hierarchy.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_session_structure")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting session structure from Ableton: {str(e)}")
+        return f"Error getting session structure: {str(e)}"
+
+@mcp.tool()
 def create_midi_track(ctx: Context, index: int = -1) -> str:
     """
     Create a new MIDI track in the Ableton session.
@@ -683,6 +700,28 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
 
 # Composite / batching tools — N sub-ops in one main-thread task = ~1 tick instead of N.
 
+# load_instrument_or_effect is a host-side alias for the wire command
+# load_browser_item (param "uri" vs "item_uri"); the batch dispatcher in the
+# Remote Script only knows wire names, so translate aliases before sending.
+_BATCH_COMMAND_ALIASES = {
+    "load_instrument_or_effect": "load_browser_item",
+}
+_BATCH_PARAM_ALIASES = {
+    "load_browser_item": {"uri": "item_uri"},
+}
+
+
+def _normalize_batch_command(cmd):
+    """Map a batch sub-command from MCP tool names/params to wire names/params."""
+    cmd_type = cmd.get("type")
+    params = dict(cmd.get("params", {}) or {})
+    cmd_type = _BATCH_COMMAND_ALIASES.get(cmd_type, cmd_type)
+    for src, dst in _BATCH_PARAM_ALIASES.get(cmd_type, {}).items():
+        if src in params and dst not in params:
+            params[dst] = params.pop(src)
+    return {"type": cmd_type, "params": params}
+
+
 @mcp.tool()
 def batch(ctx: Context, commands: List[Dict[str, Any]]) -> str:
     """
@@ -690,17 +729,20 @@ def batch(ctx: Context, commands: List[Dict[str, Any]]) -> str:
 
     Parameters:
     - commands: list of {"type": "<command_name>", "params": {...}}.
-      State-modifying types only (create_midi_track, set_track_name, create_clip,
-      add_notes_to_clip, set_clip_name, set_tempo, fire_clip, stop_clip,
-      start_playback, stop_playback, load_browser_item, delete_track, delete_clip,
-      create_clip_with_notes, create_track_with_instrument). Call get_* tools outside.
+      Use the same tool names you'd call directly. Supported types:
+      create_midi_track, set_track_name, create_clip, add_notes_to_clip,
+      set_clip_name, set_tempo, fire_clip, stop_clip, start_playback,
+      stop_playback, load_instrument_or_effect, delete_track, delete_clip,
+      create_clip_with_notes, create_track_with_instrument. Call get_* tools
+      outside. Note: load_drum_kit is a multi-step composite and is NOT batchable.
 
     Sub-commands run independently; one failure does not abort the rest.
     Returns a JSON list of `{ok, result}` or `{ok: false, error}` per sub-command.
     """
     try:
         ableton = get_ableton_connection()
-        result = ableton.send_command("batch", {"commands": commands})
+        normalized = [_normalize_batch_command(c) for c in commands]
+        result = ableton.send_command("batch", {"commands": normalized})
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error running batch: {str(e)}")

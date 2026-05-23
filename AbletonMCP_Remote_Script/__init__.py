@@ -18,6 +18,10 @@ except ImportError:
 DEFAULT_PORT = 9877
 HOST = "localhost"
 
+# Per-command logging is on the hot path; off by default. Flip to True to trace
+# every command in Ableton's log. (log_message has no levels, so we gate manually.)
+DEBUG = False
+
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
     return AbletonMCP(c_instance)
@@ -168,7 +172,8 @@ class AbletonMCP(ControlSurface):
                         command = json.loads(buffer)  # Removed decode('utf-8')
                         buffer = ''  # Clear buffer after successful parse
                         
-                        self.log_message("Received command: " + str(command.get("type", "unknown")))
+                        if DEBUG:
+                            self.log_message("Received command: " + str(command.get("type", "unknown")))
                         
                         # Process the command and get response
                         response = self._process_command(command)
@@ -233,6 +238,8 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_track_info":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
+            elif command_type == "get_session_structure":
+                response["result"] = self._get_session_structure()
             # Commands that modify Live's state must run on Ableton's main thread.
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
@@ -397,26 +404,88 @@ class AbletonMCP(ControlSurface):
 
     # Command implementations
 
+    def _group_track_index(self, track, index_by_id=None):
+        """Index of a track's immediate parent group in song.tracks, or None.
+
+        Track.group_track is the *direct* parent, so nested groups resolve to the
+        immediate enclosing group, not the outermost one.
+
+        Pass index_by_id (id(track) -> index, built once from a single
+        song.tracks snapshot) to resolve many tracks in O(1) each instead of an
+        O(n) scan per call. The == scan stays as a fallback: Live can hand out a
+        distinct proxy wrapper for the same underlying track, so a map miss is
+        possible and must not be treated as 'no parent'."""
+        group = getattr(track, "group_track", None)
+        if group is None:
+            return None
+        if index_by_id is not None:
+            idx = index_by_id.get(id(group))
+            if idx is not None:
+                return idx
+        for i, t in enumerate(self._song.tracks):
+            if t == group:
+                return i
+        return None
+
     def _get_session_info(self):
         """Get information about the current session"""
         try:
+            # One snapshot + id->index map so per-track parent lookups are O(1).
+            tracks = list(self._song.tracks)
+            index_by_id = {id(t): i for i, t in enumerate(tracks)}
             result = {
                 "tempo": self._song.tempo,
                 "signature_numerator": self._song.signature_numerator,
                 "signature_denominator": self._song.signature_denominator,
-                "track_count": len(self._song.tracks),
+                "track_count": len(tracks),
                 "return_track_count": len(self._song.return_tracks),
                 "master_track": {
                     "name": "Master",
                     "volume": self._song.master_track.mixer_device.volume.value,
                     "panning": self._song.master_track.mixer_device.panning.value
-                }
+                },
+                # Compact per-track hierarchy so structure is available without N
+                # get_track_info calls (see also get_session_structure).
+                "tracks": [
+                    {
+                        "index": i,
+                        "name": t.name,
+                        "is_group_track": bool(getattr(t, "is_foldable", False)),
+                        "is_grouped": getattr(t, "group_track", None) is not None,
+                        "group_track_index": self._group_track_index(t, index_by_id),
+                    }
+                    for i, t in enumerate(tracks)
+                ]
             }
             return result
         except Exception as e:
             self.log_message("Error getting session info: " + str(e))
             raise
     
+    def _get_session_structure(self):
+        """Whole track tree in one round-trip: top-level tracks in order, each
+        group carrying its children (recursively for nested groups)."""
+        tracks = list(self._song.tracks)
+        index_by_id = {id(t): i for i, t in enumerate(tracks)}
+        nodes = []
+        for i, t in enumerate(tracks):
+            nodes.append({
+                "index": i,
+                "name": t.name,
+                "is_group_track": bool(getattr(t, "is_foldable", False)),
+                "is_midi_track": t.has_midi_input,
+                "is_audio_track": t.has_audio_input,
+                "children": []
+            })
+        roots = []
+        for i, t in enumerate(tracks):
+            parent = self._group_track_index(t, index_by_id)
+            if parent is None:
+                roots.append(nodes[i])
+            else:
+                nodes[parent]["children"].append(nodes[i])
+        return {"tracks": roots, "track_count": len(tracks)}
+
     def _get_track_info(self, track_index):
         """Get information about a track"""
         try:
@@ -454,6 +523,14 @@ class AbletonMCP(ControlSurface):
                     "type": self._get_device_type(device)
                 })
             
+            # track.arm raises RuntimeError (not AttributeError) on tracks that
+            # can't be armed, so getattr can't guard it; use can_be_armed and fall
+            # back to None. Other reads here are safe on group tracks.
+            is_group_track = bool(getattr(track, "is_foldable", False))
+            try:
+                arm_state = track.arm if track.can_be_armed else None
+            except Exception:
+                arm_state = None
             result = {
                 "index": track_index,
                 "name": track.name,
@@ -461,9 +538,13 @@ class AbletonMCP(ControlSurface):
                 "is_midi_track": track.has_midi_input,
                 "mute": track.mute,
                 "solo": track.solo,
-                "arm": track.arm,
+                "arm": arm_state,
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
+                "is_group_track": is_group_track,
+                "is_grouped": getattr(track, "group_track", None) is not None,
+                "group_track_index": self._group_track_index(track),
+                "fold_state": getattr(track, "fold_state", None) if is_group_track else None,
                 "clip_slots": clip_slots,
                 "devices": devices
             }
@@ -847,15 +928,30 @@ class AbletonMCP(ControlSurface):
             
             # Select the track
             self._song.view.selected_track = track
-            
+
+            # Report what the load added (server.py reads new_devices/devices_after).
+            # Diff by name (multiset), not id(): Live reuses the device proxy when
+            # replacing an instrument in place, so an identity diff misses swaps.
+            before_names = [d.name for d in track.devices]
+
             # Load the item
             app.browser.load_item(item)
-            
+
+            # Synchronous for native devices; async VST/AU may not appear yet, so
+            # new_devices can be empty on success -- devices_after is reliable.
+            after_names = [d.name for d in track.devices]
+            new_devices = list(after_names)
+            for name in before_names:
+                if name in new_devices:
+                    new_devices.remove(name)
+
             result = {
                 "loaded": True,
                 "item_name": item.name,
                 "track_name": track.name,
-                "uri": item_uri
+                "uri": item_uri,
+                "new_devices": new_devices,
+                "devices_after": after_names
             }
             return result
         except Exception as e:
