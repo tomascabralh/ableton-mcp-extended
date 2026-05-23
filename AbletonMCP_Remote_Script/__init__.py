@@ -247,7 +247,10 @@ class AbletonMCP(ControlSurface):
                                  "start_playback", "stop_playback", "load_browser_item",
                                  "delete_track", "delete_clip",
                                  "batch", "create_clip_with_notes",
-                                 "create_track_with_instrument"]:
+                                 "create_track_with_instrument",
+                                 "set_track_volume", "set_track_pan",
+                                 "set_track_mute", "set_track_solo",
+                                 "set_send", "set_device_parameter"]:
                 response_queue = queue.Queue()
 
                 def main_thread_task():
@@ -346,6 +349,14 @@ class AbletonMCP(ControlSurface):
             return self._create_track_with_instrument(params.get("index", -1),
                                                       params.get("name", ""),
                                                       params.get("instrument_uri", ""))
+        elif command_type == "set_track_volume":
+            return self._set_track_volume(params.get("track_index", 0),
+                                          params.get("track_type", "track"),
+                                          params.get("value", 0.0))
+        elif command_type == "set_track_pan":
+            return self._set_track_pan(params.get("track_index", 0),
+                                       params.get("track_type", "track"),
+                                       params.get("value", 0.0))
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -589,6 +600,40 @@ class AbletonMCP(ControlSurface):
             return result
         except Exception as e:
             self.log_message("Error setting track name: " + str(e))
+            raise
+
+    def _resolve_track(self, track_index, track_type):
+        """Resolve a track object from (index, type).
+        track_type is 'track' | 'return' | 'master'."""
+        if track_type == "master":
+            return self._song.master_track
+        if track_type == "return":
+            tracks = self._song.return_tracks
+        else:
+            tracks = self._song.tracks
+        if track_index < 0 or track_index >= len(tracks):
+            raise IndexError("Track index out of range")
+        return tracks[track_index]
+
+    def _set_track_volume(self, track_index, track_type, value):
+        """Set a track's mixer volume. value is the Live-internal 0..1 fader value."""
+        try:
+            track = self._resolve_track(track_index, track_type)
+            param = track.mixer_device.volume
+            param.value = max(param.min, min(param.max, value))
+            return {"value": param.value}
+        except Exception as e:
+            self.log_message("Error setting track volume: " + str(e))
+            raise
+
+    def _set_track_pan(self, track_index, track_type, value):
+        try:
+            track = self._resolve_track(track_index, track_type)
+            param = track.mixer_device.panning
+            param.value = max(param.min, min(param.max, value))
+            return {"value": param.value}
+        except Exception as e:
+            self.log_message("Error setting track pan: " + str(e))
             raise
 
     def _delete_track(self, track_index):

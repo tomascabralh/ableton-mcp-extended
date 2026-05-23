@@ -38,6 +38,11 @@ extend-exclude = ["AbletonMCP_Remote_Script"]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
 [project.urls]
 "Homepage" = "https://github.com/ahujasid/ableton-mcp"
 "Bug Tracker" = "https://github.com/ahujasid/ableton-mcp/issues"

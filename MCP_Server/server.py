@@ -8,6 +8,8 @@ from typing import Any, AsyncIterator, Dict, List, Union
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from MCP_Server.units import db_to_live, pan_to_live
+
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -116,6 +118,8 @@ class AbletonConnection:
             "set_clip_name", "set_tempo", "fire_clip", "stop_clip", "start_playback",
             "stop_playback", "load_browser_item", "delete_track", "delete_clip",
             "batch", "create_clip_with_notes", "create_track_with_instrument",
+            "set_track_volume", "set_track_pan", "set_track_mute", "set_track_solo",
+            "set_send", "set_device_parameter",
         ]
 
         try:
@@ -450,6 +454,52 @@ def set_tempo(ctx: Context, tempo: float) -> str:
     except Exception as e:
         logger.error(f"Error setting tempo: {str(e)}")
         return f"Error setting tempo: {str(e)}"
+
+
+@mcp.tool()
+def set_track_volume(ctx: Context, track_index: int, volume_db: float, track_type: str = "track") -> str:
+    """
+    Set a track's volume in decibels.
+
+    Parameters:
+    - track_index: Index of the track (ignored when track_type='master')
+    - volume_db: Target volume in dB (~ -70 = silence, 0 = unity gain, +6 = max)
+    - track_type: 'track' (default), 'return', or 'master'
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_volume", {
+            "track_index": track_index,
+            "track_type": track_type,
+            "value": db_to_live(volume_db),
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track volume: {str(e)}")
+        return f"Error setting track volume: {str(e)}"
+
+
+@mcp.tool()
+def set_track_pan(ctx: Context, track_index: int, pan: float, track_type: str = "track") -> str:
+    """
+    Set a track's pan. pan is -100 (hard left) .. 0 (center) .. 100 (hard right).
+
+    Parameters:
+    - track_index: Index of the track (ignored when track_type='master')
+    - pan: -100..100
+    - track_type: 'track' (default), 'return', or 'master'
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_pan", {
+            "track_index": track_index,
+            "track_type": track_type,
+            "value": pan_to_live(pan),
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track pan: {str(e)}")
+        return f"Error setting track pan: {str(e)}"
 
 
 @mcp.tool()
