@@ -700,12 +700,9 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
 
 # Composite / batching tools — N sub-ops in one main-thread task = ~1 tick instead of N.
 
-# A few MCP tools don't map 1:1 to a wire command — load_instrument_or_effect is a
-# friendlier alias for the wire command load_browser_item, and it spells the URI
-# param "uri" instead of "item_uri". The Remote Script's batch dispatcher only
-# knows wire names, so a sub-command typed with the tool name (the name the model
-# actually sees) would be rejected. Translate those aliases here, where the same
-# tool->wire mapping already lives for the standalone tools.
+# load_instrument_or_effect is a host-side alias for the wire command
+# load_browser_item (param "uri" vs "item_uri"); the batch dispatcher in the
+# Remote Script only knows wire names, so translate aliases before sending.
 _BATCH_COMMAND_ALIASES = {
     "load_instrument_or_effect": "load_browser_item",
 }

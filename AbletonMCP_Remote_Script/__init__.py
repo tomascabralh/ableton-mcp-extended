@@ -523,14 +523,9 @@ class AbletonMCP(ControlSurface):
                     "type": self._get_device_type(device)
                 })
             
-            # Group/return/main tracks can't be armed; reading track.arm on them
-            # raises a RuntimeError (NOT AttributeError, so getattr's default does
-            # not catch it). can_be_armed is the safe predicate -- read it
-            # defensively and fall back to None ("not applicable", same convention
-            # as fold_state below) when the track has no arm state. has_audio_input/
-            # has_midi_input/mute/solo/mixer all exist on group tracks (proven by
-            # get_session_structure reading them unguarded), so arm is the only
-            # property here that needs this guard.
+            # track.arm raises RuntimeError (not AttributeError) on tracks that
+            # can't be armed, so getattr can't guard it; use can_be_armed and fall
+            # back to None. Other reads here are safe on group tracks.
             is_group_track = bool(getattr(track, "is_foldable", False))
             try:
                 arm_state = track.arm if track.can_be_armed else None
@@ -934,24 +929,16 @@ class AbletonMCP(ControlSurface):
             # Select the track
             self._song.view.selected_track = track
 
-            # Snapshot device names before the load so we can report what it added.
-            # server.py expects new_devices / devices_after keys; without them every
-            # load reported an empty device list. We diff by name (multiset), NOT by
-            # object identity: when a load *replaces* a track's instrument in place,
-            # Live reuses the device proxy at that slot (same id()), so an identity
-            # diff misses the swap. Names update synchronously, so a name multiset
-            # diff catches both additions (empty track / added effect) and
-            # replacements (instrument swap).
+            # Report what the load added (server.py reads new_devices/devices_after).
+            # Diff by name (multiset), not id(): Live reuses the device proxy when
+            # replacing an instrument in place, so an identity diff misses swaps.
             before_names = [d.name for d in track.devices]
 
             # Load the item
             app.browser.load_item(item)
 
-            # load_item runs synchronously on the main thread, so native
-            # instruments/effects/racks are reflected right away. (VST/AU or other
-            # async-loading plug-ins may not appear until a later tick; for those
-            # new_devices can be empty even on success -- devices_after is the
-            # reliable field.)
+            # Synchronous for native devices; async VST/AU may not appear yet, so
+            # new_devices can be empty on success -- devices_after is reliable.
             after_names = [d.name for d in track.devices]
             new_devices = list(after_names)
             for name in before_names:
