@@ -700,6 +700,31 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
 
 # Composite / batching tools — N sub-ops in one main-thread task = ~1 tick instead of N.
 
+# A few MCP tools don't map 1:1 to a wire command — load_instrument_or_effect is a
+# friendlier alias for the wire command load_browser_item, and it spells the URI
+# param "uri" instead of "item_uri". The Remote Script's batch dispatcher only
+# knows wire names, so a sub-command typed with the tool name (the name the model
+# actually sees) would be rejected. Translate those aliases here, where the same
+# tool->wire mapping already lives for the standalone tools.
+_BATCH_COMMAND_ALIASES = {
+    "load_instrument_or_effect": "load_browser_item",
+}
+_BATCH_PARAM_ALIASES = {
+    "load_browser_item": {"uri": "item_uri"},
+}
+
+
+def _normalize_batch_command(cmd):
+    """Map a batch sub-command from MCP tool names/params to wire names/params."""
+    cmd_type = cmd.get("type")
+    params = dict(cmd.get("params", {}) or {})
+    cmd_type = _BATCH_COMMAND_ALIASES.get(cmd_type, cmd_type)
+    for src, dst in _BATCH_PARAM_ALIASES.get(cmd_type, {}).items():
+        if src in params and dst not in params:
+            params[dst] = params.pop(src)
+    return {"type": cmd_type, "params": params}
+
+
 @mcp.tool()
 def batch(ctx: Context, commands: List[Dict[str, Any]]) -> str:
     """
@@ -707,17 +732,20 @@ def batch(ctx: Context, commands: List[Dict[str, Any]]) -> str:
 
     Parameters:
     - commands: list of {"type": "<command_name>", "params": {...}}.
-      State-modifying types only (create_midi_track, set_track_name, create_clip,
-      add_notes_to_clip, set_clip_name, set_tempo, fire_clip, stop_clip,
-      start_playback, stop_playback, load_browser_item, delete_track, delete_clip,
-      create_clip_with_notes, create_track_with_instrument). Call get_* tools outside.
+      Use the same tool names you'd call directly. Supported types:
+      create_midi_track, set_track_name, create_clip, add_notes_to_clip,
+      set_clip_name, set_tempo, fire_clip, stop_clip, start_playback,
+      stop_playback, load_instrument_or_effect, delete_track, delete_clip,
+      create_clip_with_notes, create_track_with_instrument. Call get_* tools
+      outside. Note: load_drum_kit is a multi-step composite and is NOT batchable.
 
     Sub-commands run independently; one failure does not abort the rest.
     Returns a JSON list of `{ok, result}` or `{ok: false, error}` per sub-command.
     """
     try:
         ableton = get_ableton_connection()
-        result = ableton.send_command("batch", {"commands": commands})
+        normalized = [_normalize_batch_command(c) for c in commands]
+        result = ableton.send_command("batch", {"commands": normalized})
         return json.dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error running batch: {str(e)}")
