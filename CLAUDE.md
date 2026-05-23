@@ -58,7 +58,7 @@ Loading instruments, effects, and drum kits goes through Ableton's browser. Tool
 ### Track hierarchy / group tracks
 
 Group tracks (`Track.is_foldable == True`) and grouped child tracks are exposed read-only:
-- `get_track_info` returns `is_group_track`, `is_grouped`, `group_track_index` (index of the *immediate* parent group, or `null`), and `fold_state` (groups only). `arm` is read via `getattr` because group/return/master tracks lack it (reading `track.arm` directly raises) — don't revert that guard. The `_group_track_index` helper resolves a parent object to its index in `song.tracks`.
+- `get_track_info` returns `is_group_track`, `is_grouped`, `group_track_index` (index of the *immediate* parent group, or `null`), and `fold_state` (groups only). `arm` is `null` for tracks that can't be armed (group/return/master): reading `track.arm` on them raises a `RuntimeError` — *not* an `AttributeError` — so it's guarded behind `track.can_be_armed` inside a `try/except`. Do **not** switch this back to `getattr(track, "arm", None)`: getattr's default only swallows `AttributeError`, so the `RuntimeError` propagates and `get_track_info` crashes on group tracks (this was the bug). The `_group_track_index` helper resolves a parent object to its index in `song.tracks`.
 - `get_session_info` mirrors a compact per-track list with the same hierarchy flags.
 - `get_session_structure` (read-only tool) returns the whole nested tree in one round-trip. Order/nesting is correct because Ableton stores a group immediately before its contiguous, index-ordered children.
 

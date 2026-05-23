@@ -523,10 +523,19 @@ class AbletonMCP(ControlSurface):
                     "type": self._get_device_type(device)
                 })
             
-            # Group/return/master tracks have no 'arm'; reading it raises, so guard it.
-            # Within song.tracks (master/return excluded) 'arm' is the only such
-            # property — mute/solo/mixer all exist on group tracks.
+            # Group/return/main tracks can't be armed; reading track.arm on them
+            # raises a RuntimeError (NOT AttributeError, so getattr's default does
+            # not catch it). can_be_armed is the safe predicate -- read it
+            # defensively and fall back to None ("not applicable", same convention
+            # as fold_state below) when the track has no arm state. has_audio_input/
+            # has_midi_input/mute/solo/mixer all exist on group tracks (proven by
+            # get_session_structure reading them unguarded), so arm is the only
+            # property here that needs this guard.
             is_group_track = bool(getattr(track, "is_foldable", False))
+            try:
+                arm_state = track.arm if track.can_be_armed else None
+            except Exception:
+                arm_state = None
             result = {
                 "index": track_index,
                 "name": track.name,
@@ -534,7 +543,7 @@ class AbletonMCP(ControlSurface):
                 "is_midi_track": track.has_midi_input,
                 "mute": track.mute,
                 "solo": track.solo,
-                "arm": getattr(track, "arm", None),
+                "arm": arm_state,
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
                 "is_group_track": is_group_track,
