@@ -933,15 +933,38 @@ class AbletonMCP(ControlSurface):
             
             # Select the track
             self._song.view.selected_track = track
-            
+
+            # Snapshot device names before the load so we can report what it added.
+            # server.py expects new_devices / devices_after keys; without them every
+            # load reported an empty device list. We diff by name (multiset), NOT by
+            # object identity: when a load *replaces* a track's instrument in place,
+            # Live reuses the device proxy at that slot (same id()), so an identity
+            # diff misses the swap. Names update synchronously, so a name multiset
+            # diff catches both additions (empty track / added effect) and
+            # replacements (instrument swap).
+            before_names = [d.name for d in track.devices]
+
             # Load the item
             app.browser.load_item(item)
-            
+
+            # load_item runs synchronously on the main thread, so native
+            # instruments/effects/racks are reflected right away. (VST/AU or other
+            # async-loading plug-ins may not appear until a later tick; for those
+            # new_devices can be empty even on success -- devices_after is the
+            # reliable field.)
+            after_names = [d.name for d in track.devices]
+            new_devices = list(after_names)
+            for name in before_names:
+                if name in new_devices:
+                    new_devices.remove(name)
+
             result = {
                 "loaded": True,
                 "item_name": item.name,
                 "track_name": track.name,
-                "uri": item_uri
+                "uri": item_uri,
+                "new_devices": new_devices,
+                "devices_after": after_names
             }
             return result
         except Exception as e:
