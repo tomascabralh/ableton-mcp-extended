@@ -257,7 +257,10 @@ class AbletonMCP(ControlSurface):
                                  "start_playback", "stop_playback", "load_browser_item",
                                  "delete_track", "delete_clip",
                                  "batch", "create_clip_with_notes",
-                                 "create_track_with_instrument"]:
+                                 "create_track_with_instrument",
+                                 "insert_clip_in_arrangement", "delete_arrangement_clip",
+                                 "duplicate_arrangement_clip", "set_arrangement_loop",
+                                 "set_arrangement_record"]:
                 response_queue = queue.Queue()
 
                 def main_thread_task():
@@ -356,6 +359,11 @@ class AbletonMCP(ControlSurface):
             return self._create_track_with_instrument(params.get("index", -1),
                                                       params.get("name", ""),
                                                       params.get("instrument_uri", ""))
+        elif command_type == "insert_clip_in_arrangement":
+            return self._insert_clip_in_arrangement(params.get("track_index", 0),
+                                                    params.get("start_beat", 0.0),
+                                                    params.get("length", 4.0),
+                                                    params.get("notes", []))
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -541,6 +549,42 @@ class AbletonMCP(ControlSurface):
                 ]
             clips.append(info)
         return {"track_index": track_index, "clip_count": len(clips), "clips": clips}
+
+    def _insert_clip_in_arrangement(self, track_index, start_beat, length, notes):
+        """Create a MIDI clip at start_beat on the track's arrangement timeline
+        and optionally fill it with notes (note times are clip-relative)."""
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        track = self._song.tracks[track_index]
+        if not track.has_midi_input:
+            raise Exception("Track {0} is not a MIDI track".format(track_index))
+        if length <= 0:
+            raise Exception("Clip length must be greater than 0")
+
+        created = track.create_midi_clip(start_beat, length)
+        # create_midi_clip may return the clip or None depending on version;
+        # locate by start beat when it returns None.
+        clip = created if created is not None else self._find_arrangement_clip(track, start_beat)
+
+        if notes:
+            live_notes = []
+            for note in notes:
+                live_notes.append((
+                    note.get("pitch", 60),
+                    note.get("start_time", 0.0),
+                    note.get("duration", 0.25),
+                    note.get("velocity", 100),
+                    note.get("mute", False),
+                ))
+            clip.set_notes(tuple(live_notes))
+
+        return {
+            "track_index": track_index,
+            "start_beat": clip.start_time,
+            "length": clip.length,
+            "name": clip.name,
+            "note_count": len(notes),
+        }
 
     def _get_track_info(self, track_index):
         """Get information about a track"""
