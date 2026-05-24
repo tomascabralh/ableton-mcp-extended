@@ -297,6 +297,38 @@ def get_session_structure(ctx: Context) -> str:
         return f"Error getting session structure: {str(e)}"
 
 @mcp.tool()
+def get_arrangement_clips(ctx: Context, track_index: int) -> str:
+    """
+    List all clips on a track's Arrangement timeline.
+
+    Parameters:
+    - track_index: The index of the track to read
+
+    Returns each clip's start_beat, length, name, is_midi_clip, and notes
+    (clip-relative note times; null for audio clips).
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_clips", {"track_index": track_index})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement clips: {str(e)}")
+        return f"Error getting arrangement clips: {str(e)}"
+
+
+@mcp.tool()
+def get_song_length(ctx: Context) -> str:
+    """Get the song length in beats (time of the last event in the Arrangement)."""
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_song_length")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting song length: {str(e)}")
+        return f"Error getting song length: {str(e)}"
+
+
+@mcp.tool()
 def create_midi_track(ctx: Context, index: int = -1) -> str:
     """
     Create a new MIDI track in the Ableton session.
