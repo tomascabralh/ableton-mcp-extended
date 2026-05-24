@@ -22,6 +22,11 @@ HOST = "localhost"
 # every command in Ableton's log. (log_message has no levels, so we gate manually.)
 DEBUG = False
 
+# Arrangement clips are addressed by start beat; match within this tolerance
+# because beat positions are floats. Clips on one track can't overlap, so the
+# match is unique.
+ARRANGEMENT_BEAT_EPSILON = 1e-3
+
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
     return AbletonMCP(c_instance)
@@ -240,6 +245,11 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_track_info(track_index)
             elif command_type == "get_session_structure":
                 response["result"] = self._get_session_structure()
+            elif command_type == "get_arrangement_clips":
+                track_index = params.get("track_index", 0)
+                response["result"] = self._get_arrangement_clips(track_index)
+            elif command_type == "get_song_length":
+                response["result"] = self._get_song_length()
             # Commands that modify Live's state must run on Ableton's main thread.
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
@@ -485,6 +495,52 @@ class AbletonMCP(ControlSurface):
             else:
                 nodes[parent]["children"].append(nodes[i])
         return {"tracks": roots, "track_count": len(tracks)}
+
+    def _find_arrangement_clip(self, track, start_beat):
+        """Return the arrangement clip on `track` whose start_time matches
+        start_beat within ARRANGEMENT_BEAT_EPSILON. Raises listing the available
+        start beats if none match. Arrangement clips on one track can't overlap,
+        so the match is unique."""
+        for clip in getattr(track, "arrangement_clips", []):
+            if abs(clip.start_time - start_beat) <= ARRANGEMENT_BEAT_EPSILON:
+                return clip
+        available = [round(c.start_time, 4) for c in getattr(track, "arrangement_clips", [])]
+        raise Exception("No arrangement clip starting at beat {0} (available: {1})".format(
+            start_beat, available))
+
+    def _get_song_length(self):
+        """Song length in beats: the time of the last event in the Arrangement."""
+        return {"length": self._song.last_event_time}
+
+    def _get_arrangement_clips(self, track_index):
+        """List the clips on a track's arrangement timeline. MIDI clips include
+        their notes (clip-relative times); audio clips report notes=None."""
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        track = self._song.tracks[track_index]
+        clips = []
+        for clip in getattr(track, "arrangement_clips", []):
+            info = {
+                "name": clip.name,
+                "start_beat": clip.start_time,
+                "length": clip.length,
+                "is_midi_clip": clip.is_midi_clip,
+                "notes": None,
+            }
+            if clip.is_midi_clip:
+                raw = clip.get_notes_extended(0, 128, 0, clip.length)
+                info["notes"] = [
+                    {
+                        "pitch": n.pitch,
+                        "start_time": n.start_time,
+                        "duration": n.duration,
+                        "velocity": n.velocity,
+                        "mute": n.mute,
+                    }
+                    for n in raw
+                ]
+            clips.append(info)
+        return {"track_index": track_index, "clip_count": len(clips), "clips": clips}
 
     def _get_track_info(self, track_index):
         """Get information about a track"""
