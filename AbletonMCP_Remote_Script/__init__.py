@@ -364,6 +364,13 @@ class AbletonMCP(ControlSurface):
                                                     params.get("start_beat", 0.0),
                                                     params.get("length", 4.0),
                                                     params.get("notes", []))
+        elif command_type == "delete_arrangement_clip":
+            return self._delete_arrangement_clip(params.get("track_index", 0),
+                                                 params.get("start_beat", 0.0))
+        elif command_type == "duplicate_arrangement_clip":
+            return self._duplicate_arrangement_clip(params.get("track_index", 0),
+                                                    params.get("source_start_beat", 0.0),
+                                                    params.get("target_start_beat", 0.0))
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -584,6 +591,34 @@ class AbletonMCP(ControlSurface):
             "length": clip.length,
             "name": clip.name,
             "note_count": len(notes),
+        }
+
+    def _delete_arrangement_clip(self, track_index, start_beat):
+        """Remove the arrangement clip starting at start_beat."""
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        track = self._song.tracks[track_index]
+        clip = self._find_arrangement_clip(track, start_beat)
+        name = clip.name
+        track.delete_clip(clip)
+        return {"deleted": True, "track_index": track_index,
+                "start_beat": start_beat, "name": name}
+
+    def _duplicate_arrangement_clip(self, track_index, source_start_beat, target_start_beat):
+        """Copy an arrangement clip from one position to another on the same track."""
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        track = self._song.tracks[track_index]
+        source = self._find_arrangement_clip(track, source_start_beat)
+        new_clip = track.duplicate_clip_to_arrangement(source, target_start_beat)
+        if new_clip is None:
+            new_clip = self._find_arrangement_clip(track, target_start_beat)
+        return {
+            "track_index": track_index,
+            "source_start_beat": source_start_beat,
+            "target_start_beat": new_clip.start_time,
+            "length": new_clip.length,
+            "name": new_clip.name,
         }
 
     def _get_track_info(self, track_index):
