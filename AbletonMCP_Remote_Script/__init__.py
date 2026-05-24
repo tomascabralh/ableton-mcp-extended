@@ -371,6 +371,12 @@ class AbletonMCP(ControlSurface):
             return self._duplicate_arrangement_clip(params.get("track_index", 0),
                                                     params.get("source_start_beat", 0.0),
                                                     params.get("target_start_beat", 0.0))
+        elif command_type == "set_arrangement_loop":
+            return self._set_arrangement_loop(params.get("start_beat", 0.0),
+                                              params.get("end_beat", 0.0),
+                                              params.get("enabled", True))
+        elif command_type == "set_arrangement_record":
+            return self._set_arrangement_record(params.get("enabled", False))
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -620,6 +626,25 @@ class AbletonMCP(ControlSurface):
             "length": new_clip.length,
             "name": new_clip.name,
         }
+
+    def _set_arrangement_loop(self, start_beat, end_beat, enabled):
+        """Set the Arrangement loop region and on/off state."""
+        if end_beat <= start_beat:
+            raise Exception("end_beat ({0}) must be greater than start_beat ({1})".format(
+                end_beat, start_beat))
+        self._song.loop_start = start_beat
+        self._song.loop_length = end_beat - start_beat
+        self._song.loop = enabled
+        return {
+            "loop": self._song.loop,
+            "loop_start": self._song.loop_start,
+            "loop_length": self._song.loop_length,
+        }
+
+    def _set_arrangement_record(self, enabled):
+        """Toggle the Arrangement record button (Song.record_mode)."""
+        self._song.record_mode = 1 if enabled else 0
+        return {"record_mode": self._song.record_mode}
 
     def _get_track_info(self, track_index):
         """Get information about a track"""
