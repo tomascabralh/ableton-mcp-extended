@@ -517,15 +517,26 @@ class AbletonMCP(ControlSurface):
                 nodes[parent]["children"].append(nodes[i])
         return {"tracks": roots, "track_count": len(tracks)}
 
+    def _track_arrangement_clips(self, track):
+        """arrangement_clips for a track, or [] for tracks that can't hold them.
+        Live RAISES (RuntimeError) when you read arrangement_clips on Main/Group/
+        Return tracks, so getattr's AttributeError-only default can't guard it --
+        the same trap as Track.arm (see _get_track_info)."""
+        try:
+            return list(track.arrangement_clips)
+        except Exception:
+            return []
+
     def _find_arrangement_clip(self, track, start_beat):
         """Return the arrangement clip on `track` whose start_time matches
         start_beat within ARRANGEMENT_BEAT_EPSILON. Raises listing the available
         start beats if none match. Arrangement clips on one track can't overlap,
         so the match is unique."""
-        for clip in getattr(track, "arrangement_clips", []):
+        clips = self._track_arrangement_clips(track)
+        for clip in clips:
             if abs(clip.start_time - start_beat) <= ARRANGEMENT_BEAT_EPSILON:
                 return clip
-        available = [round(c.start_time, 4) for c in getattr(track, "arrangement_clips", [])]
+        available = [round(c.start_time, 4) for c in clips]
         raise Exception("No arrangement clip starting at beat {0} (available: {1})".format(
             start_beat, available))
 
@@ -540,7 +551,7 @@ class AbletonMCP(ControlSurface):
             raise IndexError("Track index out of range")
         track = self._song.tracks[track_index]
         clips = []
-        for clip in getattr(track, "arrangement_clips", []):
+        for clip in self._track_arrangement_clips(track):
             info = {
                 "name": clip.name,
                 "start_beat": clip.start_time,
@@ -563,9 +574,28 @@ class AbletonMCP(ControlSurface):
             clips.append(info)
         return {"track_index": track_index, "clip_count": len(clips), "clips": clips}
 
+    def _find_or_make_empty_slot(self, track_index):
+        """Return (slot_index, created_scene_index) for an empty Session clip slot
+        on the track. Prefers an existing empty slot; if the track is full, appends
+        a scene (one empty slot on every track) and returns its index as
+        created_scene_index so the caller can delete it afterward."""
+        track = self._song.tracks[track_index]
+        for i, slot in enumerate(track.clip_slots):
+            if not slot.has_clip:
+                return i, None
+        self._song.create_scene(-1)
+        new_index = len(self._song.scenes) - 1
+        return new_index, new_index
+
     def _insert_clip_in_arrangement(self, track_index, start_beat, length, notes):
         """Create a MIDI clip at start_beat on the track's arrangement timeline
-        and optionally fill it with notes (note times are clip-relative)."""
+        and optionally fill it with notes (note times are clip-relative).
+
+        The Control Surface LOM has no Track.create_midi_clip (that exists only in
+        the Max-for-Live API), and the only way to make an arrangement clip is to
+        duplicate an existing one. So we stage a temporary Session clip, fill it,
+        duplicate it into the arrangement, then remove the staging clip (and any
+        scene we had to add) so Session view is left untouched."""
         if track_index < 0 or track_index >= len(self._song.tracks):
             raise IndexError("Track index out of range")
         track = self._song.tracks[track_index]
@@ -574,28 +604,39 @@ class AbletonMCP(ControlSurface):
         if length <= 0:
             raise Exception("Clip length must be greater than 0")
 
-        created = track.create_midi_clip(start_beat, length)
-        # create_midi_clip may return the clip or None depending on version;
-        # locate by start beat when it returns None.
-        clip = created if created is not None else self._find_arrangement_clip(track, start_beat)
+        slot_index, created_scene = self._find_or_make_empty_slot(track_index)
+        track = self._song.tracks[track_index]
+        slot = track.clip_slots[slot_index]
+        try:
+            slot.create_clip(length)
+            staging = slot.clip
+            if notes:
+                live_notes = []
+                for note in notes:
+                    live_notes.append((
+                        note.get("pitch", 60),
+                        note.get("start_time", 0.0),
+                        note.get("duration", 0.25),
+                        note.get("velocity", 100),
+                        note.get("mute", False),
+                    ))
+                staging.set_notes(tuple(live_notes))
+            arrangement_clip = track.duplicate_clip_to_arrangement(staging, start_beat)
+        finally:
+            if track.clip_slots[slot_index].has_clip:
+                track.clip_slots[slot_index].delete_clip()
+            if created_scene is not None:
+                self._song.delete_scene(created_scene)
 
-        if notes:
-            live_notes = []
-            for note in notes:
-                live_notes.append((
-                    note.get("pitch", 60),
-                    note.get("start_time", 0.0),
-                    note.get("duration", 0.25),
-                    note.get("velocity", 100),
-                    note.get("mute", False),
-                ))
-            clip.set_notes(tuple(live_notes))
-
+        # duplicate_clip_to_arrangement returns the new clip; locate by start as a
+        # fallback.
+        if arrangement_clip is None:
+            arrangement_clip = self._find_arrangement_clip(track, start_beat)
         return {
             "track_index": track_index,
-            "start_beat": clip.start_time,
-            "length": clip.length,
-            "name": clip.name,
+            "start_beat": arrangement_clip.start_time,
+            "length": arrangement_clip.length,
+            "name": arrangement_clip.name,
             "note_count": len(notes),
         }
 
@@ -628,7 +669,9 @@ class AbletonMCP(ControlSurface):
         }
 
     def _set_arrangement_loop(self, start_beat, end_beat, enabled):
-        """Set the Arrangement loop region and on/off state."""
+        """Set the Arrangement loop region and on/off state. Live applies the
+        `loop` write asynchronously, so we echo the requested values rather than
+        reading the (stale) property back in this same call."""
         if end_beat <= start_beat:
             raise Exception("end_beat ({0}) must be greater than start_beat ({1})".format(
                 end_beat, start_beat))
@@ -636,15 +679,17 @@ class AbletonMCP(ControlSurface):
         self._song.loop_length = end_beat - start_beat
         self._song.loop = enabled
         return {
-            "loop": self._song.loop,
-            "loop_start": self._song.loop_start,
-            "loop_length": self._song.loop_length,
+            "loop": bool(enabled),
+            "loop_start": start_beat,
+            "loop_length": end_beat - start_beat,
         }
 
     def _set_arrangement_record(self, enabled):
-        """Toggle the Arrangement record button (Song.record_mode)."""
+        """Toggle the Arrangement record button (Song.record_mode). The write is
+        applied asynchronously, so echo intent instead of re-reading the stale
+        property."""
         self._song.record_mode = 1 if enabled else 0
-        return {"record_mode": self._song.record_mode}
+        return {"record_mode": bool(enabled)}
 
     def _get_track_info(self, track_index):
         """Get information about a track"""
