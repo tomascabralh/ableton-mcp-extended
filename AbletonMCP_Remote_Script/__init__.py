@@ -250,6 +250,13 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_arrangement_clips(track_index)
             elif command_type == "get_song_length":
                 response["result"] = self._get_song_length()
+            elif command_type == "get_sends":
+                response["result"] = self._get_sends(params.get("track_index", 0),
+                                                      params.get("track_type", "track"))
+            elif command_type == "get_return_tracks":
+                response["result"] = self._get_return_tracks()
+            elif command_type == "get_master_track":
+                response["result"] = self._get_master_track()
             # Commands that modify Live's state must run on Ableton's main thread.
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
@@ -260,7 +267,10 @@ class AbletonMCP(ControlSurface):
                                  "create_track_with_instrument",
                                  "insert_clip_in_arrangement", "delete_arrangement_clip",
                                  "duplicate_arrangement_clip", "set_arrangement_loop",
-                                 "set_arrangement_record"]:
+                                 "set_arrangement_record",
+                                 "set_track_volume", "set_track_pan",
+                                 "set_track_mute", "set_track_solo",
+                                 "set_track_arm", "set_send"]:
                 response_queue = queue.Queue()
 
                 def main_thread_task():
@@ -377,6 +387,30 @@ class AbletonMCP(ControlSurface):
                                               params.get("enabled", True))
         elif command_type == "set_arrangement_record":
             return self._set_arrangement_record(params.get("enabled", False))
+        elif command_type == "set_track_volume":
+            return self._set_track_volume(params.get("track_index", 0),
+                                          params.get("value", 0.85),
+                                          params.get("track_type", "track"))
+        elif command_type == "set_track_pan":
+            return self._set_track_pan(params.get("track_index", 0),
+                                       params.get("value", 0.0),
+                                       params.get("track_type", "track"))
+        elif command_type == "set_track_mute":
+            return self._set_track_mute(params.get("track_index", 0),
+                                        params.get("mute", False),
+                                        params.get("track_type", "track"))
+        elif command_type == "set_track_solo":
+            return self._set_track_solo(params.get("track_index", 0),
+                                        params.get("solo", False),
+                                        params.get("track_type", "track"))
+        elif command_type == "set_track_arm":
+            return self._set_track_arm(params.get("track_index", 0),
+                                       params.get("arm", False))
+        elif command_type == "set_send":
+            return self._set_send(params.get("track_index", 0),
+                                  params.get("send_index", 0),
+                                  params.get("value", 0.0),
+                                  params.get("track_type", "track"))
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -691,6 +725,23 @@ class AbletonMCP(ControlSurface):
         self._song.record_mode = 1 if enabled else 0
         return {"record_mode": bool(enabled)}
 
+    def _resolve_track(self, track_index, track_type):
+        """Resolve a track object from (index, type). track_type is one of
+        'track', 'return', 'master'. Raises IndexError / ValueError on bad input."""
+        if track_type == "master":
+            return self._song.master_track
+        if track_type == "return":
+            returns = self._song.return_tracks
+            if track_index < 0 or track_index >= len(returns):
+                raise IndexError("Return track index out of range")
+            return returns[track_index]
+        if track_type == "track":
+            tracks = self._song.tracks
+            if track_index < 0 or track_index >= len(tracks):
+                raise IndexError("Track index out of range")
+            return tracks[track_index]
+        raise ValueError("Unknown track_type: " + str(track_type))
+
     def _get_track_info(self, track_index):
         """Get information about a track"""
         try:
@@ -746,6 +797,7 @@ class AbletonMCP(ControlSurface):
                 "arm": arm_state,
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
+                "sends": self._send_list(track),
                 "is_group_track": is_group_track,
                 "is_grouped": getattr(track, "group_track", None) is not None,
                 "group_track_index": self._group_track_index(track),
@@ -952,6 +1004,106 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting tempo: " + str(e))
             raise
     
+    def _set_track_volume(self, track_index, value, track_type):
+        """Set a track's volume fader to a raw 0..1 value (server pre-converts dB)."""
+        track = self._resolve_track(track_index, track_type)
+        v = max(0.0, min(1.0, value))
+        track.mixer_device.volume.value = v
+        return {"track_index": track_index, "track_type": track_type, "value": v}
+
+    def _set_track_pan(self, track_index, value, track_type):
+        """Set a track's pan to a raw -1..1 value (server pre-converts -100..100)."""
+        track = self._resolve_track(track_index, track_type)
+        v = max(-1.0, min(1.0, value))
+        track.mixer_device.panning.value = v
+        return {"track_index": track_index, "track_type": track_type, "value": v}
+
+    def _set_track_mute(self, track_index, mute, track_type):
+        if track_type == "master":
+            raise Exception("The master track cannot be muted")
+        track = self._resolve_track(track_index, track_type)
+        track.mute = bool(mute)
+        return {"track_index": track_index, "track_type": track_type, "mute": bool(mute)}
+
+    def _set_track_solo(self, track_index, solo, track_type):
+        if track_type == "master":
+            raise Exception("The master track cannot be soloed")
+        track = self._resolve_track(track_index, track_type)
+        track.solo = bool(solo)
+        return {"track_index": track_index, "track_type": track_type, "solo": bool(solo)}
+
+    def _set_track_arm(self, track_index, arm):
+        """Arm is track-only. Guard via can_be_armed (reading .arm on a
+        non-armable track raises RuntimeError, not AttributeError)."""
+        track = self._resolve_track(track_index, "track")
+        if not track.can_be_armed:
+            raise Exception("This track cannot be armed (group/return/master)")
+        track.arm = bool(arm)
+        return {"track_index": track_index, "arm": bool(arm)}
+
+    def _set_send(self, track_index, send_index, value, track_type):
+        """Set a send amount to a raw 0..1 value (server pre-converts dB).
+        Sends exist on regular and return tracks, not the master."""
+        if track_type == "master":
+            raise Exception("The master track has no sends")
+        track = self._resolve_track(track_index, track_type)
+        sends = track.mixer_device.sends
+        if send_index < 0 or send_index >= len(sends):
+            raise IndexError("Send index out of range")
+        v = max(0.0, min(1.0, value))
+        sends[send_index].value = v
+        return {"track_index": track_index, "track_type": track_type,
+                "send_index": send_index, "value": v}
+
+    def _send_list(self, track):
+        """Raw send values for a track, with destination return names. Returns
+        [] for tracks that have no sends (e.g. master)."""
+        out = []
+        try:
+            sends = track.mixer_device.sends
+        except Exception:
+            return out
+        returns = self._song.return_tracks
+        for i, send in enumerate(sends):
+            name = returns[i].name if i < len(returns) else ("Send " + chr(65 + i))
+            out.append({"index": i, "name": name, "value": send.value})
+        return out
+
+    def _get_sends(self, track_index, track_type):
+        track = self._resolve_track(track_index, track_type)
+        return {"track_index": track_index, "track_type": track_type,
+                "sends": self._send_list(track)}
+
+    def _get_return_tracks(self):
+        out = []
+        for i, track in enumerate(self._song.return_tracks):
+            out.append({
+                "index": i,
+                "name": track.name,
+                "mute": track.mute,
+                "solo": track.solo,
+                "volume": track.mixer_device.volume.value,
+                "panning": track.mixer_device.panning.value,
+                "sends": self._send_list(track),
+                "devices": [{"index": di, "name": d.name,
+                             "class_name": d.class_name,
+                             "type": self._get_device_type(d)}
+                            for di, d in enumerate(track.devices)],
+            })
+        return {"return_tracks": out}
+
+    def _get_master_track(self):
+        track = self._song.master_track
+        return {
+            "name": track.name,
+            "volume": track.mixer_device.volume.value,
+            "panning": track.mixer_device.panning.value,
+            "devices": [{"index": di, "name": d.name,
+                         "class_name": d.class_name,
+                         "type": self._get_device_type(d)}
+                        for di, d in enumerate(track.devices)],
+        }
+
     def _fire_clip(self, track_index, clip_index):
         """Fire a clip"""
         try:
