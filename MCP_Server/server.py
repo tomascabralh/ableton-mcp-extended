@@ -8,6 +8,8 @@ from typing import Any, AsyncIterator, Dict, List, Union
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from MCP_Server.units import db_from_live, db_to_live, pan_from_live, pan_to_live
+
 # Configure logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -119,6 +121,8 @@ class AbletonConnection:
             "insert_clip_in_arrangement", "delete_arrangement_clip",
             "duplicate_arrangement_clip", "set_arrangement_loop",
             "set_arrangement_record",
+            "set_track_volume", "set_track_pan", "set_track_mute",
+            "set_track_solo", "set_track_arm", "set_send",
         ]
 
         try:
@@ -255,6 +259,20 @@ def get_ableton_connection():
 
 # Core Tool endpoints
 
+
+def _enrich_mixer(d):
+    """Attach human-unit volume_db/pan to a dict carrying raw volume/panning,
+    and convert any raw send values to dB. Mutates and returns d."""
+    if "volume" in d:
+        d["volume_db"] = db_from_live(d["volume"])
+    if "panning" in d:
+        d["pan"] = pan_from_live(d["panning"])
+    for s in d.get("sends", []):
+        if "value" in s:
+            s["value_db"] = db_from_live(s["value"])
+    return d
+
+
 @mcp.tool()
 def get_session_info(ctx: Context) -> str:
     """Get detailed information about the current Ableton session"""
@@ -269,7 +287,8 @@ def get_session_info(ctx: Context) -> str:
 @mcp.tool()
 def get_track_info(ctx: Context, track_index: int) -> str:
     """
-    Get detailed information about a specific track in Ableton.
+    Get detailed information about a specific track, including mixer state
+    (volume_db, pan, mute, solo, arm, sends).
 
     Parameters:
     - track_index: The index of the track to get information about
@@ -277,7 +296,7 @@ def get_track_info(ctx: Context, track_index: int) -> str:
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_track_info", {"track_index": track_index})
-        return json.dumps(result, indent=2)
+        return json.dumps(_enrich_mixer(result), indent=2)
     except Exception as e:
         logger.error(f"Error getting track info from Ableton: {str(e)}")
         return f"Error getting track info: {str(e)}"
@@ -485,6 +504,165 @@ def set_tempo(ctx: Context, tempo: float) -> str:
     except Exception as e:
         logger.error(f"Error setting tempo: {str(e)}")
         return f"Error setting tempo: {str(e)}"
+
+
+@mcp.tool()
+def set_track_volume(ctx: Context, track_index: int, volume_db: float, track_type: str = "track") -> str:
+    """
+    Set a track's volume in decibels.
+
+    Parameters:
+    - track_index: Index of the track (ignored when track_type='master')
+    - volume_db: Target volume in dB (~ -70 = silence, 0 = unity, +6 = max)
+    - track_type: 'track' (default), 'return', or 'master'
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_volume", {
+            "track_index": track_index, "track_type": track_type,
+            "value": db_to_live(volume_db),
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track volume: {str(e)}")
+        return f"Error setting track volume: {str(e)}"
+
+
+@mcp.tool()
+def set_track_pan(ctx: Context, track_index: int, pan: float, track_type: str = "track") -> str:
+    """
+    Set a track's pan. pan is -100 (hard left) .. 0 (center) .. 100 (hard right).
+
+    Parameters:
+    - track_index: Index of the track (ignored when track_type='master')
+    - pan: -100..100
+    - track_type: 'track' (default), 'return', or 'master'
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_pan", {
+            "track_index": track_index, "track_type": track_type,
+            "value": pan_to_live(pan),
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track pan: {str(e)}")
+        return f"Error setting track pan: {str(e)}"
+
+
+@mcp.tool()
+def set_track_mute(ctx: Context, track_index: int, mute: bool, track_type: str = "track") -> str:
+    """
+    Mute or unmute a track. track_type is 'track' (default) or 'return'
+    (the master cannot be muted).
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_mute", {
+            "track_index": track_index, "mute": mute, "track_type": track_type,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track mute: {str(e)}")
+        return f"Error setting track mute: {str(e)}"
+
+
+@mcp.tool()
+def set_track_solo(ctx: Context, track_index: int, solo: bool, track_type: str = "track") -> str:
+    """
+    Solo or unsolo a track. track_type is 'track' (default) or 'return'
+    (the master cannot be soloed).
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_solo", {
+            "track_index": track_index, "solo": solo, "track_type": track_type,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track solo: {str(e)}")
+        return f"Error setting track solo: {str(e)}"
+
+
+@mcp.tool()
+def set_track_arm(ctx: Context, track_index: int, arm: bool) -> str:
+    """
+    Arm or disarm a track for recording. Only regular tracks can be armed
+    (group/return/master cannot).
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_track_arm", {
+            "track_index": track_index, "arm": arm,
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting track arm: {str(e)}")
+        return f"Error setting track arm: {str(e)}"
+
+
+@mcp.tool()
+def set_send(ctx: Context, track_index: int, send_index: int, value_db: float, track_type: str = "track") -> str:
+    """
+    Set a track's send amount in decibels. send_index addresses return tracks in
+    order (send 0 -> first return). track_type is 'track' (default) or 'return'.
+
+    Parameters:
+    - value_db: Send level in dB (~ -70 = off, 0 = unity, +6 = max)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_send", {
+            "track_index": track_index, "send_index": send_index,
+            "track_type": track_type, "value": db_to_live(value_db),
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting send: {str(e)}")
+        return f"Error setting send: {str(e)}"
+
+
+@mcp.tool()
+def get_sends(ctx: Context, track_index: int, track_type: str = "track") -> str:
+    """
+    List a track's sends (level in dB + destination return-track name).
+    track_type is 'track' (default) or 'return'.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_sends", {
+            "track_index": track_index, "track_type": track_type})
+        return json.dumps(_enrich_mixer(result), indent=2)
+    except Exception as e:
+        logger.error(f"Error getting sends: {str(e)}")
+        return f"Error getting sends: {str(e)}"
+
+
+@mcp.tool()
+def get_return_tracks(ctx: Context) -> str:
+    """List all return tracks with mixer state (volume_db, pan, mute, solo,
+    sends) and devices."""
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_return_tracks")
+        for rt in result.get("return_tracks", []):
+            _enrich_mixer(rt)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting return tracks: {str(e)}")
+        return f"Error getting return tracks: {str(e)}"
+
+
+@mcp.tool()
+def get_master_track(ctx: Context) -> str:
+    """Get the master track's mixer state (volume_db, pan) and devices."""
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_master_track")
+        return json.dumps(_enrich_mixer(result), indent=2)
+    except Exception as e:
+        logger.error(f"Error getting master track: {str(e)}")
+        return f"Error getting master track: {str(e)}"
 
 
 @mcp.tool()
