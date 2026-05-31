@@ -116,6 +116,9 @@ class AbletonConnection:
             "set_clip_name", "set_tempo", "fire_clip", "stop_clip", "start_playback",
             "stop_playback", "load_browser_item", "delete_track", "delete_clip",
             "batch", "create_clip_with_notes", "create_track_with_instrument",
+            "insert_clip_in_arrangement", "delete_arrangement_clip",
+            "duplicate_arrangement_clip", "set_arrangement_loop",
+            "set_arrangement_record",
         ]
 
         try:
@@ -295,6 +298,38 @@ def get_session_structure(ctx: Context) -> str:
     except Exception as e:
         logger.error(f"Error getting session structure from Ableton: {str(e)}")
         return f"Error getting session structure: {str(e)}"
+
+@mcp.tool()
+def get_arrangement_clips(ctx: Context, track_index: int) -> str:
+    """
+    List all clips on a track's Arrangement timeline.
+
+    Parameters:
+    - track_index: The index of the track to read
+
+    Returns each clip's start_beat, length, name, is_midi_clip, and notes
+    (clip-relative note times; null for audio clips).
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_arrangement_clips", {"track_index": track_index})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting arrangement clips: {str(e)}")
+        return f"Error getting arrangement clips: {str(e)}"
+
+
+@mcp.tool()
+def get_song_length(ctx: Context) -> str:
+    """Get the song length in beats (time of the last event in the Arrangement)."""
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_song_length")
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting song length: {str(e)}")
+        return f"Error getting song length: {str(e)}"
+
 
 @mcp.tool()
 def create_midi_track(ctx: Context, index: int = -1) -> str:
@@ -733,8 +768,11 @@ def batch(ctx: Context, commands: List[Dict[str, Any]]) -> str:
       create_midi_track, set_track_name, create_clip, add_notes_to_clip,
       set_clip_name, set_tempo, fire_clip, stop_clip, start_playback,
       stop_playback, load_instrument_or_effect, delete_track, delete_clip,
-      create_clip_with_notes, create_track_with_instrument. Call get_* tools
-      outside. Note: load_drum_kit is a multi-step composite and is NOT batchable.
+      create_clip_with_notes, create_track_with_instrument,
+      insert_clip_in_arrangement, delete_arrangement_clip,
+      duplicate_arrangement_clip, set_arrangement_loop, set_arrangement_record.
+      Call get_* tools outside. Note: load_drum_kit is a multi-step composite
+      and is NOT batchable.
 
     Sub-commands run independently; one failure does not abort the rest.
     Returns a JSON list of `{ok, result}` or `{ok: false, error}` per sub-command.
@@ -808,6 +846,136 @@ def create_track_with_instrument(
     except Exception as e:
         logger.error(f"Error creating track with instrument: {str(e)}")
         return f"Error creating track with instrument: {str(e)}"
+
+
+# Arrangement-view tools — mutating; address clips by start beat (not slot index).
+
+@mcp.tool()
+def insert_clip_in_arrangement(
+    ctx: Context,
+    track_index: int,
+    start_beat: float,
+    length: float,
+    notes: List[Dict[str, Union[int, float, bool]]] = None,
+) -> str:
+    """
+    Create a MIDI clip at a specific position on a track's Arrangement timeline.
+
+    Parameters:
+    - track_index: index of the (MIDI) track
+    - start_beat: arrangement position in beats
+    - length: clip length in beats
+    - notes: optional list of {pitch, start_time, duration, velocity, mute};
+      note times are clip-relative (0 = clip start)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("insert_clip_in_arrangement", {
+            "track_index": track_index,
+            "start_beat": start_beat,
+            "length": length,
+            "notes": notes or [],
+        })
+        return (f"Inserted clip on track {track_index} at beat "
+                f"{result.get('start_beat', start_beat)} "
+                f"({result.get('length', length)} beats, "
+                f"{result.get('note_count', 0)} notes)")
+    except Exception as e:
+        logger.error(f"Error inserting arrangement clip: {str(e)}")
+        return f"Error inserting arrangement clip: {str(e)}"
+
+
+@mcp.tool()
+def delete_arrangement_clip(ctx: Context, track_index: int, start_beat: float) -> str:
+    """
+    Delete the arrangement clip starting at a given beat on a track.
+
+    Parameters:
+    - track_index: index of the track
+    - start_beat: start position (beats) of the clip to remove
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("delete_arrangement_clip", {
+            "track_index": track_index,
+            "start_beat": start_beat,
+        })
+        return (f"Deleted arrangement clip '{result.get('name', '')}' at beat "
+                f"{start_beat} on track {track_index}")
+    except Exception as e:
+        logger.error(f"Error deleting arrangement clip: {str(e)}")
+        return f"Error deleting arrangement clip: {str(e)}"
+
+
+@mcp.tool()
+def duplicate_arrangement_clip(
+    ctx: Context, track_index: int, source_start_beat: float, target_start_beat: float
+) -> str:
+    """
+    Copy an arrangement clip from one timeline position to another (same track).
+
+    Parameters:
+    - track_index: index of the track
+    - source_start_beat: start position (beats) of the clip to copy
+    - target_start_beat: where to place the copy (beats)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("duplicate_arrangement_clip", {
+            "track_index": track_index,
+            "source_start_beat": source_start_beat,
+            "target_start_beat": target_start_beat,
+        })
+        return (f"Duplicated clip from beat {source_start_beat} to "
+                f"{result.get('target_start_beat', target_start_beat)} "
+                f"on track {track_index}")
+    except Exception as e:
+        logger.error(f"Error duplicating arrangement clip: {str(e)}")
+        return f"Error duplicating arrangement clip: {str(e)}"
+
+
+@mcp.tool()
+def set_arrangement_loop(
+    ctx: Context, start_beat: float, end_beat: float, enabled: bool = True
+) -> str:
+    """
+    Set the Arrangement loop region.
+
+    Parameters:
+    - start_beat: loop start (beats)
+    - end_beat: loop end (beats); must be greater than start_beat
+    - enabled: turn the arrangement loop on (default True)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_arrangement_loop", {
+            "start_beat": start_beat,
+            "end_beat": end_beat,
+            "enabled": enabled,
+        })
+        return (f"Set arrangement loop: start={result.get('loop_start', start_beat)}, "
+                f"length={result.get('loop_length', end_beat - start_beat)}, "
+                f"enabled={result.get('loop', enabled)}")
+    except Exception as e:
+        logger.error(f"Error setting arrangement loop: {str(e)}")
+        return f"Error setting arrangement loop: {str(e)}"
+
+
+@mcp.tool()
+def set_arrangement_record(ctx: Context, enabled: bool) -> str:
+    """
+    Toggle the Arrangement record button.
+
+    Parameters:
+    - enabled: True to arm arrangement recording, False to disable
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_arrangement_record", {"enabled": enabled})
+        return f"Set arrangement record to {bool(result.get('record_mode', enabled))}"
+    except Exception as e:
+        logger.error(f"Error setting arrangement record: {str(e)}")
+        return f"Error setting arrangement record: {str(e)}"
 
 
 # Main execution
