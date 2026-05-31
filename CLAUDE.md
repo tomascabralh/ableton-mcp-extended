@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+notion: https://www.notion.so/ableton-mcp-extended-36a122e9b84181168e72e6621f87c527 (project overview + Future Work roadmap; used by the project-roadmap skill)
+
 ## Run / install
 
 - Run the MCP server (preferred, no permanent install): `uvx ableton-mcp`
@@ -65,6 +67,16 @@ Group tracks (`Track.is_foldable == True`) and grouped child tracks are exposed 
 ### Arrangement timeline
 
 Arrangement-view clips are addressed by **start beat** (not slot index). The Control Surface LOM has **no `Track.create_midi_clip`** — that exists only in the Max-for-Live API (`_MxDCore`), not the remote-script `Live.Track.Track`. The only way to make an arrangement clip is `Track.duplicate_clip_to_arrangement(clip, time)`, which needs an existing source clip. So `insert_clip_in_arrangement` **stages a temporary Session clip** (`clip_slot.create_clip` + `set_notes`, note times clip-relative), duplicates it to the arrangement at `start_beat`, then deletes the staging clip (and any scene it had to add) so Session view is untouched. `delete_arrangement_clip` uses `Track.delete_clip(clip)`; `duplicate_arrangement_clip` uses `Track.duplicate_clip_to_arrangement`. Both locate the source via `_find_arrangement_clip`, matching `clip.start_time` within `ARRANGEMENT_BEAT_EPSILON` (clips on one track can't overlap, so the match is unique). **`Song.loop` and `Song.record_mode` writes apply asynchronously** — reading them back in the same handler returns the stale pre-write value, so `set_arrangement_loop` / `set_arrangement_record` echo the requested values instead of re-reading. Reading `track.arrangement_clips` **raises `RuntimeError`** ("Main, Group and Return Tracks have no arrangement clips") on tracks that can't hold them — `getattr(track, "arrangement_clips", [])` does NOT guard this (default only swallows `AttributeError`, same trap as `arm`), so access goes through `_track_arrangement_clips` which try/excepts to `[]`. `get_arrangement_clips` is read-only (worker thread); `get_song_length` returns `Song.last_event_time`. Requires **Live 11+** (`arrangement_clips` / `duplicate_clip_to_arrangement`); targeted at Live 12.
+
+### Mixer & routing
+
+Nine tools cover the mixer: `set_track_volume`, `set_track_pan`, `set_track_mute`, `set_track_solo`, `set_track_arm`, `set_send` (mutating) and `get_sends`, `get_return_tracks`, `get_master_track` (read-only). `get_track_info` was also extended to report mixer state (`volume_db`, `pan`, `mute`, `solo`, `arm`, `sends`).
+
+- **Human units live on the SERVER; the Remote Script speaks only raw Live values.** `MCP_Server/units.py` (a pure module, host-side, *not* imported by the Py2 Remote Script) converts dB ↔ Live's non-linear `0.0–1.0` fader (`db_to_live`/`db_from_live`) and `-100..100` pan ↔ `-1.0..1.0` (`pan_to_live`/`pan_from_live`). Write tools convert human→raw *before* `send_command`; read tools convert raw→human *after* via the `_enrich_mixer` helper (which adds `volume_db`/`pan`/`value_db`). The Remote Script handlers only clamp and set raw values. **The dB curve is a piecewise-linear approximation** (anchor table in `units.py`, load-bearing anchors `0 dB ≈ 0.85`, `+6 dB = 1.0`) — refining it against a real Live set is a deferred follow-up.
+- **`track_type` addressing**: every per-track tool takes `track_type` ∈ `{'track','return','master'}`, resolved by the Remote Script's `_resolve_track` helper (`song.tracks` / `song.return_tracks` / `song.master_track`). Capability guards: the master can't be muted/soloed and has no sends; only regular tracks can be armed (the `can_be_armed` / `RuntimeError` trap, same as `get_track_info`).
+- **Echo, don't re-read**: mutating handlers echo the requested raw value rather than reading it back, matching the `set_arrangement_loop` precedent.
+- **Relative changes ("−3 dB") are read-then-write**, not a dedicated tool: read current `volume_db` via the extended `get_track_info`, compute the target, write the absolute value. There are no relative-delta params.
+- Sends reuse the volume dB curve. `send_index` addresses return tracks in order (send 0 → first return); `_send_list` zips send values with return-track names and try/excepts the `sends` access to `[]` (master has none).
 
 ## Gotchas
 
