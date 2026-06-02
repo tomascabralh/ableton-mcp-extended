@@ -257,6 +257,11 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_return_tracks()
             elif command_type == "get_master_track":
                 response["result"] = self._get_master_track()
+            elif command_type == "get_device_parameters":
+                response["result"] = self._get_device_parameters(
+                    params.get("track_index", 0),
+                    params.get("device_index", 0),
+                    params.get("track_type", "track"))
             # Commands that modify Live's state must run on Ableton's main thread.
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
@@ -1102,6 +1107,38 @@ class AbletonMCP(ControlSurface):
                          "class_name": d.class_name,
                          "type": self._get_device_type(d)}
                         for di, d in enumerate(track.devices)],
+        }
+
+    def _get_device_parameters(self, track_index, device_index, track_type):
+        """List a device's parameters in native units. Read-only; runs on the
+        worker thread. str_for_value can be missing/raise across Live versions
+        -- degrade to None rather than failing the whole read."""
+        track = self._resolve_track(track_index, track_type)
+        if device_index < 0 or device_index >= len(track.devices):
+            raise IndexError("Device index out of range")
+        device = track.devices[device_index]
+        params = []
+        for i, p in enumerate(device.parameters):
+            try:
+                display = p.str_for_value(p.value)
+            except Exception:
+                display = None
+            params.append({
+                "index": i,
+                "name": p.name,
+                "value": p.value,
+                "min": p.min,
+                "max": p.max,
+                "is_quantized": bool(p.is_quantized),
+                "is_enabled": bool(p.is_enabled),
+                "display_value": display,
+            })
+        return {
+            "track_index": track_index,
+            "track_type": track_type,
+            "device_index": device_index,
+            "device_name": device.name,
+            "parameters": params,
         }
 
     def _fire_clip(self, track_index, clip_index):

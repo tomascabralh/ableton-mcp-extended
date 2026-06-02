@@ -666,6 +666,28 @@ def get_master_track(ctx: Context) -> str:
 
 
 @mcp.tool()
+def get_device_parameters(ctx: Context, track_index: int, device_index: int, track_type: str = "track") -> str:
+    """
+    List a device's parameters in native units (Hz, dB, ratio, semitones, etc.),
+    each with value/min/max, an is_quantized flag (enum/toggle vs continuous),
+    is_enabled (False = locked, not writable), and a display_value string.
+
+    Discover parameters here, then set them by name with set_device_parameter.
+    device_index is the index from get_track_info's devices list. track_type is
+    'track' (default), 'return', or 'master'.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_device_parameters", {
+            "track_index": track_index, "device_index": device_index,
+            "track_type": track_type})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error getting device parameters: {str(e)}")
+        return f"Error getting device parameters: {str(e)}"
+
+
+@mcp.tool()
 def load_instrument_or_effect(ctx: Context, track_index: int, uri: str) -> str:
     """
     Load an instrument or effect onto a track using its URI.
