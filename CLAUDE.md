@@ -78,6 +78,16 @@ Nine tools cover the mixer: `set_track_volume`, `set_track_pan`, `set_track_mute
 - **Relative changes ("−3 dB") are read-then-write**, not a dedicated tool: read current `volume_db` via the extended `get_track_info`, compute the target, write the absolute value. There are no relative-delta params.
 - Sends reuse the volume dB curve. `send_index` addresses return tracks in order (send 0 → first return); `_send_list` zips send values with return-track names and try/excepts the `sends` access to `[]` (master has none).
 
+### Device parameters
+
+Two tools dial any loaded device's knobs: `get_device_parameters` (read-only) and `set_device_parameter` (mutating). This is Layer 2 of the mixing/mastering design — one parameter layer covers native FX (EQ Eight, Compressor, Reverb, Limiter), native instruments (Drift/Operator/Wavetable), **and** mastering chains, because they're all `DeviceParameter` objects on `track.devices[i]`.
+
+- **Native units, NO conversion.** Unlike the mixer's dB/pan curve, device parameters are already in their own native units (Hz, dB, ratio, semitones, enum step). The server tools are thin pass-throughs — they do **not** touch `units.py` / `_enrich_mixer`. Clamping to `[param.min, param.max]` happens on the **Remote Script** side (where `min`/`max` are known); `set_device_parameter` **echoes** the clamped value it wrote (no re-read), matching the mixer/arrangement precedent.
+- **Discovery-first addressing.** Call `get_device_parameters(track_index, device_index, track_type)` to list params (`{index, name, value, min, max, is_quantized, is_enabled, display_value}` plus the device's `device_name`/`class_name`/`type`), then `set_device_parameter` by **name** (case-insensitive) or by **index passed as a numeric string** — `_resolve_parameter` parses `int(str(selector))` and falls through to name match on `ValueError` (the `bool`-before-`int` guard matters since `bool` subclasses `int`). `device_index` is the same index `get_track_info` reports.
+- **Graceful degradation / guards.** `param.str_for_value(...)` is wrapped in try/except → `display_value=None` (it's missing/raises on some Live versions). Writes are refused on `param.is_enabled == False` (macro-mapped/automated/locked) with a clear error rather than a silent no-op.
+- **`set_device_parameter` is fully wired as a mutating command** (the three places: `is_modifying_command`, the `_process_command` main-thread list, and a `_dispatch_state_command` branch), so it's **batch-compatible** automatically — a multi-knob dial collapses into one `_Framework` tick.
+- **Deferred (not built):** `delete_device`; Layer 3 automation (`get_clip_envelope`/`set_clip_envelope`); rack/nested-device addressing (Layer 2 only walks `track.devices`, so rack-buried params under `device.chains[i].devices[j]` aren't reachable — flat native devices and rack Macro 1–8 are).
+
 ## Gotchas
 
 - **FastMCP constructor signature drifts across `mcp` package versions.** Commit `a31dcdb` removed a `description=` kwarg that newer FastMCP doesn't accept. If you bump the `mcp` dependency, re-verify the `FastMCP(...)` call in `server.py:187`.
