@@ -123,6 +123,7 @@ class AbletonConnection:
             "set_arrangement_record",
             "set_track_volume", "set_track_pan", "set_track_mute",
             "set_track_solo", "set_track_arm", "set_send",
+            "set_device_parameter",
         ]
 
         try:
@@ -685,6 +686,29 @@ def get_device_parameters(ctx: Context, track_index: int, device_index: int, tra
     except Exception as e:
         logger.error(f"Error getting device parameters: {str(e)}")
         return f"Error getting device parameters: {str(e)}"
+
+
+@mcp.tool()
+def set_device_parameter(ctx: Context, track_index: int, device_index: int, parameter: str, value: float, track_type: str = "track") -> str:
+    """
+    Set a device parameter to a value in its native units (Hz, dB, ratio,
+    semitones...). The value is clamped to the parameter's [min, max] on the
+    Live side. Discover names/ranges first with get_device_parameters.
+
+    Parameters:
+    - parameter: parameter name (case-insensitive) or its integer index as a string
+    - value: target in native units; for quantized/enum params pass the integer step
+    - track_type: 'track' (default), 'return', or 'master'
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_device_parameter", {
+            "track_index": track_index, "device_index": device_index,
+            "parameter": parameter, "value": value, "track_type": track_type})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting device parameter: {str(e)}")
+        return f"Error setting device parameter: {str(e)}"
 
 
 @mcp.tool()

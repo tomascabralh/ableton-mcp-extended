@@ -275,7 +275,8 @@ class AbletonMCP(ControlSurface):
                                  "set_arrangement_record",
                                  "set_track_volume", "set_track_pan",
                                  "set_track_mute", "set_track_solo",
-                                 "set_track_arm", "set_send"]:
+                                 "set_track_arm", "set_send",
+                                 "set_device_parameter"]:
                 response_queue = queue.Queue()
 
                 def main_thread_task():
@@ -416,6 +417,12 @@ class AbletonMCP(ControlSurface):
                                   params.get("send_index", 0),
                                   params.get("value", 0.0),
                                   params.get("track_type", "track"))
+        elif command_type == "set_device_parameter":
+            return self._set_device_parameter(params.get("track_index", 0),
+                                              params.get("device_index", 0),
+                                              params.get("parameter"),
+                                              params.get("value", 0.0),
+                                              params.get("track_type", "track"))
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -1059,6 +1066,50 @@ class AbletonMCP(ControlSurface):
         sends[send_index].value = v
         return {"track_index": track_index, "track_type": track_type,
                 "send_index": send_index, "value": v}
+
+    def _resolve_parameter(self, device, selector):
+        """Resolve a parameter selector (int/numeric-string index, or
+        case-insensitive name) to a DeviceParameter. Py2-safe."""
+        params = device.parameters
+        idx = None
+        if isinstance(selector, bool):
+            raise ValueError("Invalid parameter selector")
+        if isinstance(selector, int):
+            idx = selector
+        else:
+            s = str(selector)
+            if s.lstrip("-").isdigit():
+                idx = int(s)
+        if idx is not None:
+            if idx < 0 or idx >= len(params):
+                raise IndexError("Parameter index out of range")
+            return idx, params[idx]
+        target = str(selector).strip().lower()
+        for i, p in enumerate(params):
+            if p.name.strip().lower() == target:
+                return i, p
+        raise ValueError("No parameter named '" + str(selector) + "'")
+
+    def _set_device_parameter(self, track_index, device_index, selector, value, track_type):
+        """Set a device parameter to a native-unit value, clamped to
+        [min, max]. Echoes the written value (does not re-read)."""
+        track = self._resolve_track(track_index, track_type)
+        if device_index < 0 or device_index >= len(track.devices):
+            raise IndexError("Device index out of range")
+        device = track.devices[device_index]
+        param_index, param = self._resolve_parameter(device, selector)
+        if not param.is_enabled:
+            raise Exception("Parameter '" + param.name + "' is not enabled (locked/automated)")
+        v = max(param.min, min(param.max, float(value)))
+        param.value = v
+        return {
+            "track_index": track_index,
+            "track_type": track_type,
+            "device_index": device_index,
+            "parameter_index": param_index,
+            "name": param.name,
+            "value": v,
+        }
 
     def _send_list(self, track):
         """Raw send values for a track, with destination return names. Returns
