@@ -1077,9 +1077,11 @@ class AbletonMCP(ControlSurface):
         if isinstance(selector, int):
             idx = selector
         else:
-            s = str(selector)
-            if s.lstrip("-").isdigit():
-                idx = int(s)
+            # A numeric string is an index; anything else (a name) falls through.
+            try:
+                idx = int(str(selector))
+            except ValueError:
+                idx = None
         if idx is not None:
             if idx < 0 or idx >= len(params):
                 raise IndexError("Parameter index out of range")
