@@ -1138,6 +1138,8 @@ class AbletonMCP(ControlSurface):
             "track_type": track_type,
             "device_index": device_index,
             "device_name": device.name,
+            "class_name": device.class_name,
+            "type": self._get_device_type(device),
             "parameters": params,
         }
 
