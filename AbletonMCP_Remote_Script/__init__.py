@@ -257,6 +257,11 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_return_tracks()
             elif command_type == "get_master_track":
                 response["result"] = self._get_master_track()
+            elif command_type == "get_device_parameters":
+                response["result"] = self._get_device_parameters(
+                    params.get("track_index", 0),
+                    params.get("device_index", 0),
+                    params.get("track_type", "track"))
             # Commands that modify Live's state must run on Ableton's main thread.
             elif command_type in ["create_midi_track", "set_track_name",
                                  "create_clip", "add_notes_to_clip", "set_clip_name",
@@ -270,7 +275,8 @@ class AbletonMCP(ControlSurface):
                                  "set_arrangement_record",
                                  "set_track_volume", "set_track_pan",
                                  "set_track_mute", "set_track_solo",
-                                 "set_track_arm", "set_send"]:
+                                 "set_track_arm", "set_send",
+                                 "set_device_parameter"]:
                 response_queue = queue.Queue()
 
                 def main_thread_task():
@@ -411,6 +417,12 @@ class AbletonMCP(ControlSurface):
                                   params.get("send_index", 0),
                                   params.get("value", 0.0),
                                   params.get("track_type", "track"))
+        elif command_type == "set_device_parameter":
+            return self._set_device_parameter(params.get("track_index", 0),
+                                              params.get("device_index", 0),
+                                              params.get("parameter"),
+                                              params.get("value", 0.0),
+                                              params.get("track_type", "track"))
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -1055,6 +1067,54 @@ class AbletonMCP(ControlSurface):
         return {"track_index": track_index, "track_type": track_type,
                 "send_index": send_index, "value": v}
 
+    def _resolve_parameter(self, device, selector):
+        """Resolve a parameter selector (int/numeric-string index, or
+        case-insensitive name) to a DeviceParameter. Py2-safe."""
+        params = device.parameters
+        idx = None
+        if selector is None:
+            raise ValueError("'parameter' is required (name or index)")
+        if isinstance(selector, bool):
+            raise ValueError("Invalid parameter selector")
+        if isinstance(selector, int):
+            idx = selector
+        else:
+            # A numeric string is an index; anything else (a name) falls through.
+            try:
+                idx = int(str(selector))
+            except ValueError:
+                idx = None
+        if idx is not None:
+            if idx < 0 or idx >= len(params):
+                raise IndexError("Parameter index out of range")
+            return idx, params[idx]
+        target = str(selector).strip().lower()
+        for i, p in enumerate(params):
+            if p.name.strip().lower() == target:
+                return i, p
+        raise ValueError("No parameter named '" + str(selector) + "'")
+
+    def _set_device_parameter(self, track_index, device_index, selector, value, track_type):
+        """Set a device parameter to a native-unit value, clamped to
+        [min, max]. Echoes the written value (does not re-read)."""
+        track = self._resolve_track(track_index, track_type)
+        if device_index < 0 or device_index >= len(track.devices):
+            raise IndexError("Device index out of range")
+        device = track.devices[device_index]
+        param_index, param = self._resolve_parameter(device, selector)
+        if not param.is_enabled:
+            raise Exception("Parameter '" + param.name + "' is not enabled (locked/automated)")
+        v = max(param.min, min(param.max, float(value)))
+        param.value = v
+        return {
+            "track_index": track_index,
+            "track_type": track_type,
+            "device_index": device_index,
+            "parameter_index": param_index,
+            "name": param.name,
+            "value": v,
+        }
+
     def _send_list(self, track):
         """Raw send values for a track, with destination return names. Returns
         [] for tracks that have no sends (e.g. master)."""
@@ -1102,6 +1162,40 @@ class AbletonMCP(ControlSurface):
                          "class_name": d.class_name,
                          "type": self._get_device_type(d)}
                         for di, d in enumerate(track.devices)],
+        }
+
+    def _get_device_parameters(self, track_index, device_index, track_type):
+        """List a device's parameters in native units. Read-only; runs on the
+        worker thread. str_for_value can be missing/raise across Live versions
+        -- degrade to None rather than failing the whole read."""
+        track = self._resolve_track(track_index, track_type)
+        if device_index < 0 or device_index >= len(track.devices):
+            raise IndexError("Device index out of range")
+        device = track.devices[device_index]
+        params = []
+        for i, p in enumerate(device.parameters):
+            try:
+                display = p.str_for_value(p.value)
+            except Exception:
+                display = None
+            params.append({
+                "index": i,
+                "name": p.name,
+                "value": p.value,
+                "min": p.min,
+                "max": p.max,
+                "is_quantized": bool(p.is_quantized),
+                "is_enabled": bool(p.is_enabled),
+                "display_value": display,
+            })
+        return {
+            "track_index": track_index,
+            "track_type": track_type,
+            "device_index": device_index,
+            "device_name": device.name,
+            "class_name": device.class_name,
+            "type": self._get_device_type(device),
+            "parameters": params,
         }
 
     def _fire_clip(self, track_index, clip_index):
