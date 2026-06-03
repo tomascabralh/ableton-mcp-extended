@@ -1072,6 +1072,8 @@ class AbletonMCP(ControlSurface):
         case-insensitive name) to a DeviceParameter. Py2-safe."""
         params = device.parameters
         idx = None
+        if selector is None:
+            raise ValueError("'parameter' is required (name or index)")
         if isinstance(selector, bool):
             raise ValueError("Invalid parameter selector")
         if isinstance(selector, int):
