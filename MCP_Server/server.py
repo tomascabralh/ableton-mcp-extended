@@ -124,6 +124,7 @@ class AbletonConnection:
             "set_track_volume", "set_track_pan", "set_track_mute",
             "set_track_solo", "set_track_arm", "set_send",
             "set_device_parameter",
+            "set_clip_envelope", "clear_clip_envelope",
         ]
 
         try:
@@ -259,6 +260,10 @@ def get_ableton_connection():
 
 
 # Core Tool endpoints
+
+
+def _identity(v):
+    return v
 
 
 def _enrich_mixer(d):
@@ -709,6 +714,56 @@ def set_device_parameter(ctx: Context, track_index: int, device_index: int, para
     except Exception as e:
         logger.error(f"Error setting device parameter: {str(e)}")
         return f"Error setting device parameter: {str(e)}"
+
+
+@mcp.tool()
+def set_clip_envelope(ctx: Context, track_index: int, clip_slot_index: int, target_type: str,
+                      points: list, device_index: int = 0, parameter: str = "",
+                      send_index: int = 0, interpolation: str = "linear") -> str:
+    """
+    Write parameter automation into a SESSION clip (track_index, clip_slot_index).
+    points = [[beat, value], ...] clip-relative, ascending.
+    target_type: 'device' (device_index+parameter, native units), 'volume'/'send' (dB),
+    'pan' (-100..100). interpolation: 'linear' (smooth) or 'hold' (stepped).
+    Arrangement automation is not supported (Live API limitation).
+    """
+    try:
+        if target_type in ("volume", "send"):
+            vf = db_to_live
+        elif target_type == "pan":
+            vf = pan_to_live
+        elif target_type == "device":
+            vf = _identity
+        else:
+            return "Error: target_type must be 'device', 'volume', 'pan', or 'send'"
+        conv = [[float(p[0]), vf(float(p[1]))] for p in points]
+        ableton = get_ableton_connection()
+        result = ableton.send_command("set_clip_envelope", {
+            "track_index": track_index, "clip_slot_index": clip_slot_index,
+            "target_type": target_type, "device_index": device_index,
+            "parameter": parameter, "send_index": send_index,
+            "points": conv, "interpolation": interpolation})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error setting clip envelope: {str(e)}")
+        return f"Error setting clip envelope: {str(e)}"
+
+
+@mcp.tool()
+def clear_clip_envelope(ctx: Context, track_index: int, clip_slot_index: int, target_type: str,
+                        device_index: int = 0, parameter: str = "", send_index: int = 0) -> str:
+    """Remove automation for one parameter from a session clip. Addressing matches
+    set_clip_envelope."""
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("clear_clip_envelope", {
+            "track_index": track_index, "clip_slot_index": clip_slot_index,
+            "target_type": target_type, "device_index": device_index,
+            "parameter": parameter, "send_index": send_index})
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error clearing clip envelope: {str(e)}")
+        return f"Error clearing clip envelope: {str(e)}"
 
 
 @mcp.tool()
