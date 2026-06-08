@@ -1160,7 +1160,6 @@ class AbletonMCP(ControlSurface):
         lo = param.min
         hi = param.max
         clip_len = clip.length
-        count = 0
         n = len(points)
         for i in range(n):
             t = points[i][0]
@@ -1170,17 +1169,19 @@ class AbletonMCP(ControlSurface):
                     length = points[i + 1][0] - t
                 else:
                     length = clip_len - t
-                    if length < 1e-4:
-                        length = 1e-4
+                # Points arrive sorted; clamp anyway so a stray out-of-order
+                # point can never hand insert_step a negative length.
+                if length < 1e-4:
+                    length = 1e-4
             else:
                 length = 0.0
             env.insert_step(t, length, v)
-            count += 1
         return {"track_index": params.get("track_index", 0),
-                "clip_slot_index": slot_index, "steps_written": count,
+                "clip_slot_index": slot_index, "steps_written": n,
                 "parameter_name": param.name}
 
     def _clear_clip_envelope(self, params):
+        """Remove the automation envelope for one parameter from a session clip."""
         track = self._resolve_track(params.get("track_index", 0), "track")
         slot_index = params.get("clip_slot_index", 0)
         if slot_index < 0 or slot_index >= len(track.clip_slots):

@@ -737,6 +737,7 @@ def set_clip_envelope(ctx: Context, track_index: int, clip_slot_index: int, targ
         else:
             return "Error: target_type must be 'device', 'volume', 'pan', or 'send'"
         conv = [[float(p[0]), vf(float(p[1]))] for p in points]
+        conv.sort(key=lambda p: p[0])  # ascending by time; hold-length logic relies on it
         ableton = get_ableton_connection()
         result = ableton.send_command("set_clip_envelope", {
             "track_index": track_index, "clip_slot_index": clip_slot_index,
@@ -755,6 +756,8 @@ def clear_clip_envelope(ctx: Context, track_index: int, clip_slot_index: int, ta
     """Remove automation for one parameter from a session clip. Addressing matches
     set_clip_envelope."""
     try:
+        if target_type not in ("device", "volume", "pan", "send"):
+            return "Error: target_type must be 'device', 'volume', 'pan', or 'send'"
         ableton = get_ableton_connection()
         result = ableton.send_command("clear_clip_envelope", {
             "track_index": track_index, "clip_slot_index": clip_slot_index,
