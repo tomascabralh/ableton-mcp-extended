@@ -11,3 +11,9 @@ wheels/
 .DS_Store
 
 docs/
+
+# Local agent-CLI config
+.codex/
+
+# Local agent guidance copy (CLAUDE.md is the source of truth)
+AGENTS.md

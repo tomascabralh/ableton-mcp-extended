@@ -276,7 +276,8 @@ class AbletonMCP(ControlSurface):
                                  "set_track_volume", "set_track_pan",
                                  "set_track_mute", "set_track_solo",
                                  "set_track_arm", "set_send",
-                                 "set_device_parameter"]:
+                                 "set_device_parameter",
+                                 "set_clip_envelope", "clear_clip_envelope"]:
                 response_queue = queue.Queue()
 
                 def main_thread_task():
@@ -423,6 +424,10 @@ class AbletonMCP(ControlSurface):
                                               params.get("parameter"),
                                               params.get("value", 0.0),
                                               params.get("track_type", "track"))
+        elif command_type == "set_clip_envelope":
+            return self._set_clip_envelope(params)
+        elif command_type == "clear_clip_envelope":
+            return self._clear_clip_envelope(params)
         else:
             raise Exception("Unknown state-modifying command: " + command_type)
 
@@ -1067,6 +1072,24 @@ class AbletonMCP(ControlSurface):
         return {"track_index": track_index, "track_type": track_type,
                 "send_index": send_index, "value": v}
 
+    def _resolve_envelope_parameter(self, track, target_type, device_index, parameter, send_index):
+        """Resolve the DeviceParameter to automate, by target_type."""
+        if target_type == "volume":
+            return track.mixer_device.volume
+        if target_type == "pan":
+            return track.mixer_device.panning
+        if target_type == "send":
+            sends = track.mixer_device.sends
+            if send_index < 0 or send_index >= len(sends):
+                raise IndexError("Send index out of range")
+            return sends[send_index]
+        if target_type == "device":
+            if device_index < 0 or device_index >= len(track.devices):
+                raise IndexError("Device index out of range")
+            _, param = self._resolve_parameter(track.devices[device_index], parameter)
+            return param
+        raise ValueError("Unknown target_type: " + str(target_type))
+
     def _resolve_parameter(self, device, selector):
         """Resolve a parameter selector (int/numeric-string index, or
         case-insensitive name) to a DeviceParameter. Py2-safe."""
@@ -1114,6 +1137,65 @@ class AbletonMCP(ControlSurface):
             "name": param.name,
             "value": v,
         }
+
+    def _set_clip_envelope(self, params):
+        """Write a session-clip automation envelope. interpolation 'linear' uses
+        zero-length breakpoints (Ableton interpolates); 'hold' uses steps held to
+        the next point (last point tails to clip end). Values clamped to [min,max]."""
+        track = self._resolve_track(params.get("track_index", 0), "track")
+        slot_index = params.get("clip_slot_index", 0)
+        if slot_index < 0 or slot_index >= len(track.clip_slots):
+            raise IndexError("Clip slot index out of range")
+        slot = track.clip_slots[slot_index]
+        if not slot.has_clip:
+            raise Exception("No clip in slot " + str(slot_index))
+        clip = slot.clip
+        param = self._resolve_envelope_parameter(
+            track, params.get("target_type", ""), params.get("device_index", 0),
+            params.get("parameter", ""), params.get("send_index", 0))
+        points = params.get("points", [])
+        interpolation = params.get("interpolation", "linear")
+        clip.clear_envelope(param)
+        env = clip.create_automation_envelope(param)
+        lo = param.min
+        hi = param.max
+        clip_len = clip.length
+        n = len(points)
+        for i in range(n):
+            t = points[i][0]
+            v = max(lo, min(hi, points[i][1]))
+            if interpolation == "hold":
+                if i + 1 < n:
+                    length = points[i + 1][0] - t
+                else:
+                    length = clip_len - t
+                # Points arrive sorted; clamp anyway so a stray out-of-order
+                # point can never hand insert_step a negative length.
+                if length < 1e-4:
+                    length = 1e-4
+            else:
+                length = 0.0
+            env.insert_step(t, length, v)
+        return {"track_index": params.get("track_index", 0),
+                "clip_slot_index": slot_index, "steps_written": n,
+                "parameter_name": param.name}
+
+    def _clear_clip_envelope(self, params):
+        """Remove the automation envelope for one parameter from a session clip."""
+        track = self._resolve_track(params.get("track_index", 0), "track")
+        slot_index = params.get("clip_slot_index", 0)
+        if slot_index < 0 or slot_index >= len(track.clip_slots):
+            raise IndexError("Clip slot index out of range")
+        slot = track.clip_slots[slot_index]
+        if not slot.has_clip:
+            raise Exception("No clip in slot " + str(slot_index))
+        param = self._resolve_envelope_parameter(
+            track, params.get("target_type", ""), params.get("device_index", 0),
+            params.get("parameter", ""), params.get("send_index", 0))
+        slot.clip.clear_envelope(param)
+        return {"track_index": params.get("track_index", 0),
+                "clip_slot_index": slot_index, "cleared": True,
+                "parameter_name": param.name}
 
     def _send_list(self, track):
         """Raw send values for a track, with destination return names. Returns
